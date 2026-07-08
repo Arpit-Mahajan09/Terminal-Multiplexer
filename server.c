@@ -1,10 +1,13 @@
 #define _GNU_SOURCE
 #define _XOPEN_SOURCE 600 
+#define HISTORY_SIZE (1024 * 64)    
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+
 #include <sys/wait.h>
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
@@ -13,6 +16,34 @@
 
 #include "cronos.h"
 #include <signal.h>
+
+char history_buf[HISTORY_SIZE];
+size_t hist_head = 0;
+size_t hist_size = 0;
+
+void add_to_history(const char* buff, size_t len){
+    for(size_t i=0; i<len; i++){
+        history_buf[(hist_head + hist_size)% HISTORY_SIZE] = buff[i]; 
+        if(hist_size< HISTORY_SIZE){
+            hist_size++; 
+        }
+        else{
+            hist_head = (hist_head+1)% HISTORY_SIZE; 
+        }
+    }
+}
+
+void dump_history_to_client(int client_fd) {
+    if (hist_size == 0) return;
+
+    size_t first_part = HISTORY_SIZE - hist_head;
+    if (hist_size <= first_part) {
+        write(client_fd, history_buf + hist_head, hist_size);
+    } else {
+        write(client_fd, history_buf + hist_head, first_part);
+        write(client_fd, history_buf, hist_size - first_part);
+    }
+}
 
 char global_socket_path[256];
 char global_pid_path[256];
@@ -118,6 +149,7 @@ int main(int argc, char* argv[]) {
                     epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_client, &ev_client);
 
                     client_sock = new_client; 
+                    dump_history_to_client(client_sock);
                 }
             }
             
@@ -133,7 +165,10 @@ int main(int argc, char* argv[]) {
             
             else if (events[i].data.fd == masterFd && (events[i].events & EPOLLIN)) {
                 ssize_t bytes = read(masterFd, buffer, sizeof(buffer)); 
-                if (bytes>0 && client_sock!=-1) write(client_sock, buffer, bytes);
+                if (bytes>0 && client_sock!=-1) {
+                    add_to_history(buffer, bytes);
+                    if(client_sock !=-1) write(client_sock, buffer, bytes);
+                }
                 else if (bytes <= 0) running = 0; 
             }
         }

@@ -11,7 +11,9 @@ typedef enum {
     STATE_GROUND,
     STATE_ESCAPE,
     STATE_CSI_ENTRY,
-    STATE_CSI_PARAM
+    STATE_CSI_PARAM, 
+    STATE_OSC,         
+    STATE_OSC_ESCAPE
 } AnsiState;
 
 typedef struct {
@@ -94,6 +96,30 @@ void execute_csi_sequence(TerminalState *state, char final_byte, struct ncplane 
         int col = (state->param_count>1 && state->params[1]>0)? state->params[1]:1;
         ncplane_cursor_move_yx(pane, row - 1, col - 1);
     }
+    else if (final_byte=='K'){
+        int param = (state->param_count>0)? state->params[0]: 0; 
+        unsigned int curY, curX, dimY, dimX; 
+        
+        ncplane_cursor_yx(pane, &curY, &curX); 
+        ncplane_dim_yx(pane, &dimY, &dimX); 
+
+        if(param==0){
+            for(unsigned int i=curX; i<dimX; i++){
+                ncplane_putchar_yx(pane, curY, i, ' '); 
+            }
+        }
+        else if(param==1){
+            for(unsigned int i=0; i<dimX; i++){
+                ncplane_putchar_yx(pane, curY, i, ' '); 
+            }
+        }
+        else if(param==2){
+            for(unsigned int i=0; i<dimX; i++){
+                ncplane_putchar_yx(pane, curY, i, ' '); 
+            }
+        }
+        ncplane_cursor_move_yx(pane, curY, curX); 
+    }
 }
 
 
@@ -126,7 +152,10 @@ void parse_ansi_byte(TerminalState *state, char ch, struct ncplane *pane) {
                 state->param_count = 0;
                 state->current_param_value = 0;
                 for (int i = 0; i < MAX_ANSI_PARAMS; i++) state->params[i] = 0;
-            } else {
+            } else if(ch == ']'){
+                state->current_state = STATE_OSC; 
+            }
+            else{
                 // CSI sequence (could be OSC, DCS, etc. which are more complex)
                 // For a basic multiplexer, drop it and return to ground
                 state->current_state = STATE_GROUND;
@@ -161,11 +190,34 @@ void parse_ansi_byte(TerminalState *state, char ch, struct ncplane *pane) {
                 // Return to normal text processing
                 state->current_state = STATE_GROUND;
             } 
+            else if (ch == ':') {
+                // Kitty protocol sub-parameter separator (e.g. "1:3" in "5:3u")
+                // Save current value, discard the sub-value that follows
+                if (state->param_count < MAX_ANSI_PARAMS) {
+                    state->params[state->param_count++] = state->current_param_value;
+                }
+                state->current_param_value = 0;
+                state->current_state = STATE_CSI_PARAM;
+            }
+            else if (ch == '?' || ch == '>' || ch == '<' || ch == '=') {
+                //stay in param state
+            }
             else {
                 // Unexpected character (e.g., C0 control character in the middle of a sequence)
                 // Robust parsers handle this differently, but returning to ground is a safe fallback
                 state->current_state = STATE_GROUND;
             }
             break;
+        case STATE_OSC:
+            if (ch == '\007') {
+                state->current_state = STATE_GROUND;
+            } else if (ch == '\x1B') {
+                state->current_state = STATE_OSC_ESCAPE;
+            }
+            break;
+        case STATE_OSC_ESCAPE:
+            state->current_state = (ch == '\\') ? STATE_GROUND : STATE_OSC;
+            break;
+
     }
 }

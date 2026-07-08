@@ -15,4 +15,11 @@ typedef struct {
 
 } Pkt;
 
+typedef struct {
+    uint8_t type;      // 0 = Keystroke, 1 = PTY Output, 2 = Command (e.g., "Split")
+    int pane_id;       // Which pane is this for?
+    size_t data_len;   // How many bytes of payload?
+    char payload[256]; // The actual text or ANSI codes
+} CronosPacket;
+
 #endif

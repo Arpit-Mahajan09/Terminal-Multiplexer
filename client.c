@@ -1,28 +1,52 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include <signal.h>
 #include <unistd.h>
+
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <sys/un.h>
+
 #include <fcntl.h>        
 #include <termios.h>
 #include <dirent.h>
 #include <locale.h>
 #include <notcurses/notcurses.h>
+
 #include "parser.c"
 #include "cronos.h"
+
+
 
 struct notcurses_options opts = { 
     .loglevel = NCLOGLEVEL_SILENT,
     .flags = NCOPTION_SUPPRESS_BANNERS | NCOPTION_NO_QUIT_SIGHANDLERS
 };
 
-struct termios original_terminal_settings;
+struct termios orig_t;
 int raw_mode_active = 0; 
 
+static struct notcurses *nc_global = NULL;
 
+static void cleanup_handler(int sig) {
+    (void)sig;
+    if (nc_global) {
+        notcurses_stop(nc_global);
+        nc_global = NULL;
+    }
+
+    if (raw_mode_active) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &orig_t);
+    }
+    // Force-restore terminal in case notcurses_stop missed anything
+    write(STDOUT_FILENO, "\033[?1049l", 8); // exit alt screen
+    write(STDOUT_FILENO, "\033[?25h",   6); // restore cursor
+    write(STDOUT_FILENO, "\033[0m",     4); // reset colors
+    _exit(0);
+}
 
 struct notcurses *nc = NULL;
 TerminalState pane_state;   
@@ -40,13 +64,78 @@ void print_usage(char *prog){
     printf("  cronos new dev_env\n");
 }
 
+typedef struct Pane {
+    int id;
+    int pty_master_fd;         // The FD for this specific shell
+    pid_t shell_pid;           // The PID of this specific shell
+    TerminalState state;       // The ANSI parser state for this pane
+    
+    // Notcurses UI elements
+    struct ncplane *nc_plane;  // The specific window for this pane
+    int width;
+    int height;
+    int y;
+    int x;
+    
+    // Linked list or Tree pointers
+    struct Pane *next;         
+} Pane;
+
+Pane *active_pane = NULL;
+
+
+Pane* split_pane_vertically(struct notcurses *nc, Pane *parent_pane) {
+    // 1. Calculate new dimensions (split the width in half)
+    int new_width = parent_pane->width / 2;
+    int right_start_x = parent_pane->x + new_width;
+    
+    ncplane_resize(parent_pane->nc_plane, 0, 0,                            
+                   parent_pane->height, new_width, 0, 0,  
+                   parent_pane->height, new_width);
+               
+    parent_pane->width = new_width;
+
+    // 3. Create the new right pane
+    struct ncplane_options nopts = {
+        .y = parent_pane->y,
+        .x = right_start_x,
+        .rows = parent_pane->height,
+        .cols = parent_pane->width, // (The remaining half)
+        .flags = 0,
+    };
+    
+    struct ncplane *new_nc_plane = ncplane_create(parent_pane->nc_plane, &nopts);
+    ncplane_set_scrolling(new_nc_plane, true);
+
+    // 4. Allocate memory for the new Pane struct
+    Pane *new_pane = malloc(sizeof(Pane));
+    new_pane->nc_plane = new_nc_plane;
+    new_pane->width = parent_pane->width;
+    new_pane->height = parent_pane->height;
+    new_pane->y = parent_pane->y;
+    new_pane->x = right_start_x;
+    
+    // 5. Spawn a brand new PTY and Shell for this pane!
+    new_pane->pty_master_fd = spawn_new_pty(&new_pane->shell_pid);
+    init_terminal_state(&new_pane->state);
+    
+    return new_pane;
+}
 
 int run_session(const char *socket_path){
+
     int client_sock = socket(AF_UNIX, SOCK_STREAM, 0);
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
+
+    if (tcgetattr(STDIN_FILENO, &orig_t) == 0) {
+        struct termios raw = orig_t;
+        cfmakeraw(&raw);
+        tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+        raw_mode_active = 1;
+    }
     
     int connected =0; 
     for (int i = 0; i < 20; i++) {
@@ -61,12 +150,15 @@ int run_session(const char *socket_path){
         close(client_sock);
         return 1;
     }
+
     setlocale(LC_ALL, "");
     nc = notcurses_init(&opts, NULL);
     if (nc == NULL) {
         fprintf(stderr, "\nFatal: Failed to initialize Notcurses.\n");
+        if (raw_mode_active) tcsetattr(STDIN_FILENO, TCSANOW, &orig_t);
         return 1;
     }
+    nc_global = nc;
     init_terminal_state(&pane_state);
 
     int epoll_fd = epoll_create1(0);
@@ -97,14 +189,27 @@ int run_session(const char *socket_path){
                 // reads changes in user terminal 
                 while((id = notcurses_get_nblock(nc, &ni))!=0){
                     if(id == (uint32_t)-1) break; 
+                    if (ni.evtype == NCTYPE_RELEASE) {
+                        continue;
+                    }
                      
                     if((id=='Q'|| id=='q') && ni.ctrl){
                         printf("\r\n[Client Detached]\r\n"); 
                         running =0; 
                         break; 
                     }
-
-                    if(id< 0x80){
+                    if((id=='B'|| id=='b') && ni.ctrl){
+                        split_pane_vertically(); 
+                    }
+                    if (id == NCKEY_BACKSPACE || id == 0x7F || id == '\b') {
+                        char c = 0x7F;           
+                        write(client_sock, &c, 1);
+                    }
+                    else if (id == NCKEY_ENTER || id == NCKEY_RETURN) {
+                        char c = '\r';                       // Enter
+                        write(client_sock, &c, 1);
+                    }
+                    else if(id< 0x80){
                         char c = (char)id; 
                         write(client_sock, &c, 1);
                     }
@@ -132,6 +237,10 @@ int run_session(const char *socket_path){
     }
 
     notcurses_stop(nc);
+    if (raw_mode_active) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &orig_t);
+        raw_mode_active = 0;
+    }
     close(client_sock);
     printf("\nDisconnected from Cronos server.\n");
     return 0;
@@ -163,6 +272,7 @@ void list_sessions(){
     closedir(dir);
 
 }
+
 void kill_all_sessions() {
     DIR *dir = opendir("/tmp");
     if (!dir) {
