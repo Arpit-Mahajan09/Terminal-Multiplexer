@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <notcurses/notcurses.h>
 
+
 #define MAX_ANSI_PARAMS 16
 // This file acts as a state machine that would read the ANSI characters from server 
 // before sending them to the frontend
@@ -33,6 +34,7 @@ void init_terminal_state(TerminalState *state) {
     }
 }
 
+
 void execute_csi_sequence(TerminalState *state, char final_byte, struct ncplane *pane) {
     if (final_byte == 'm') { 
         if (state->param_count == 0) {
@@ -43,8 +45,8 @@ void execute_csi_sequence(TerminalState *state, char final_byte, struct ncplane 
         for (int i = 0; i < state->param_count; i++) {
             switch (state->params[i]) {
                 case 0:  // Reset all formatting
-                    ncplane_set_fg_default(pane);
-                    ncplane_set_bg_default(pane);
+                    ncplane_set_fg_rgb8(pane, 220, 220, 220);
+                    ncplane_set_bg_rgb8(pane, 0, 0, 0);
                     break;
                 case 30: ncplane_set_fg_rgb8(pane, 0, 0, 0); break;       // Black
                 case 31: ncplane_set_fg_rgb8(pane, 170, 0, 0); break;     // Red
@@ -96,6 +98,23 @@ void execute_csi_sequence(TerminalState *state, char final_byte, struct ncplane 
         int col = (state->param_count>1 && state->params[1]>0)? state->params[1]:1;
         ncplane_cursor_move_yx(pane, row - 1, col - 1);
     }
+    else if (final_byte == 'J') {
+        int param = (state->param_count > 0) ? state->params[0] : 0; 
+        unsigned int curY, curX, dimY, dimX;
+        ncplane_cursor_yx(pane, &curY, &curX); 
+        ncplane_dim_yx(pane, &dimY, &dimX);
+
+        if (param == 0) { 
+            ncplane_erase_region(pane, curY, curX, dimY - curY, dimX - curX);
+        }
+        else if (param == 1) { 
+            ncplane_erase_region(pane, 0, 0, curY, curX);
+        }
+        else if (param == 2 || param == 3) { 
+            ncplane_erase(pane);
+            ncplane_cursor_move_yx(pane, 0, 0);
+        }
+    }
     else if (final_byte=='K'){
         int param = (state->param_count>0)? state->params[0]: 0; 
         unsigned int curY, curX, dimY, dimX; 
@@ -119,6 +138,38 @@ void execute_csi_sequence(TerminalState *state, char final_byte, struct ncplane 
             }
         }
         ncplane_cursor_move_yx(pane, curY, curX); 
+        }
+    else if (final_byte == 'A') {  // Cursor Up
+        int n = (state->param_count > 0 && state->params[0] > 0) ? state->params[0] : 1;
+        unsigned int y, x;
+        ncplane_cursor_yx(pane, &y, &x);
+        ncplane_cursor_move_yx(pane, (y >= (unsigned)n) ? y - n : 0, x);
+    }
+    else if (final_byte == 'B') {  // Cursor Down
+        int n = (state->param_count > 0 && state->params[0] > 0) ? state->params[0] : 1;
+        unsigned int y, x, dimy, dimx;
+        ncplane_cursor_yx(pane, &y, &x);
+        ncplane_dim_yx(pane, &dimy, &dimx);
+        ncplane_cursor_move_yx(pane, (y + n < dimy) ? y + n : dimy - 1, x);
+    }
+    else if (final_byte == 'C') {  // Cursor Right
+        int n = (state->param_count > 0 && state->params[0] > 0) ? state->params[0] : 1;
+        unsigned int y, x, dimy, dimx;
+        ncplane_cursor_yx(pane, &y, &x);
+        ncplane_dim_yx(pane, &dimy, &dimx);
+        ncplane_cursor_move_yx(pane, y, (x + n < dimx) ? x + n : dimx - 1);
+    }
+    else if (final_byte == 'D') {  // Cursor Left
+        int n = (state->param_count > 0 && state->params[0] > 0) ? state->params[0] : 1;
+        unsigned int y, x;
+        ncplane_cursor_yx(pane, &y, &x);
+        ncplane_cursor_move_yx(pane, y, (x >= (unsigned)n) ? x - n : 0);
+    }
+    else if (final_byte == 'G') {  // Cursor Horizontal Absolute
+        int col = (state->param_count > 0 && state->params[0] > 0) ? state->params[0] - 1 : 0;
+        unsigned int y, x;
+        ncplane_cursor_yx(pane, &y, &x);
+        ncplane_cursor_move_yx(pane, y, col);
     }
 }
 
@@ -133,9 +184,7 @@ void parse_ansi_byte(TerminalState *state, char ch, struct ncplane *pane) {
                 ncplane_cursor_yx(pane, &y, &x);
                 ncplane_cursor_move_yx(pane, y, 0);
             } else if (ch == '\n') {    // Move cursor down one row
-                unsigned int y, x;
-                ncplane_cursor_yx(pane, &y, &x);
-                ncplane_cursor_move_yx(pane, y + 1, x);
+                ncplane_putchar(pane, '\n');
             } else if (ch == '\b') {    // Move cursor left one column
                 unsigned int y, x;
                 ncplane_cursor_yx(pane, &y, &x);

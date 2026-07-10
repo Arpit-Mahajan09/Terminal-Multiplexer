@@ -14,12 +14,29 @@
 #include <termios.h>
 #include <dirent.h>
 #include <locale.h>
+#include <errno.h> 
 #include <notcurses/notcurses.h>
 
 #include "parser.c"
 #include "cronos.h"
 
 
+typedef struct Pane {
+    int id;
+    int pty_master_fd;         
+    pid_t shell_pid;           
+    TerminalState state;       
+    
+    struct ncplane *nc_plane;  
+    int width;
+    int height;
+    int y;
+    int x;
+
+    struct Pane *next;         
+} Pane;
+
+Pane *pane_list_head = NULL;
 
 struct notcurses_options opts = { 
     .loglevel = NCLOGLEVEL_SILENT,
@@ -31,6 +48,22 @@ int raw_mode_active = 0;
 
 static struct notcurses *nc_global = NULL;
 
+int count_active_sessions(){
+    DIR *dir = opendir("/tmp"); 
+    if(!dir) return 0; 
+
+    struct dirent *entry;
+    int count = 0;
+    
+    while ((entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, "cronos_", 7) == 0 && strstr(entry->d_name, ".sock")) {
+            count++;
+        }
+    }
+    closedir(dir);
+    return count;
+}
+
 static void cleanup_handler(int sig) {
     (void)sig;
     if (nc_global) {
@@ -41,7 +74,7 @@ static void cleanup_handler(int sig) {
     if (raw_mode_active) {
         tcsetattr(STDIN_FILENO, TCSANOW, &orig_t);
     }
-    // Force-restore terminal in case notcurses_stop missed anything
+    write(STDOUT_FILENO, "\033[0 q", 5);
     write(STDOUT_FILENO, "\033[?1049l", 8); // exit alt screen
     write(STDOUT_FILENO, "\033[?25h",   6); // restore cursor
     write(STDOUT_FILENO, "\033[0m",     4); // reset colors
@@ -59,70 +92,74 @@ void print_usage(char *prog){
     printf("  %s list            - List all active background sessions\n", prog);
     printf("  %s kill <name>     - Kill an active background session\n", prog);
     printf("  %s killall         - Kill all background sessions\n", prog); 
-    printf("  %s --help, -h      - Display this help menu\n\n", prog);
+    printf("  %s --help, -h      - Display this help menu\n", prog);
+    printf("  %s --inst, -i      - Display shortcuts for tmux plane handling\n\n", prog);
     printf("Example:\n");
     printf("  cronos new dev_env\n");
 }
 
-typedef struct Pane {
-    int id;
-    int pty_master_fd;         // The FD for this specific shell
-    pid_t shell_pid;           // The PID of this specific shell
-    TerminalState state;       // The ANSI parser state for this pane
-    
-    // Notcurses UI elements
-    struct ncplane *nc_plane;  // The specific window for this pane
-    int width;
-    int height;
-    int y;
-    int x;
-    
-    // Linked list or Tree pointers
-    struct Pane *next;         
-} Pane;
+void print_short(char *prog){
+    printf("Cronos Terminal Multiplexer CLI\n\n");
+    printf("Shortcut Keys: \n");
+    printf("  Create New Terminal    :  Ctrl + n\n");
+    printf("  Split Vertically       :  Ctrl + v\n");
+    printf("  Split Horizontally     :  Ctrl + b\n");
+    printf("  Move Focus Right       :  Ctrl + h\n");
+    printf("  Move Focus Above       :  Ctrl + j\n");
+    printf("  Move Focus Below       :  Ctrl + k\n");
+    printf("  Move Focus Left        :  Ctrl + l\n");
+    printf("  Split Horizontally     :  Ctrl + b\n");
+    printf("  Close Terminal       :  Ctrl + q\n\n");
+}
+
 
 Pane *active_pane = NULL;
 
+void update_active_ui(struct notcurses *nc, struct ncplane *footer, Pane *active_pane, const char *session_name, int session_cnt) {
+    if (!footer || !active_pane) return;
+    Pane *p = pane_list_head;
+    while (p) {
+        uint64_t channels = 0;
+        ncchannels_set_fg_rgb8(&channels, 220, 220, 220);
+        
+        if (p == active_pane) {
+            ncchannels_set_bg_rgb8(&channels, 30, 30, 50); 
+        } else {
+            ncchannels_set_bg_rgb8(&channels, 0, 0, 0); 
+        }
+        ncplane_set_base(p->nc_plane, " ", 0, channels);
+        p = p->next;
+    }
 
-Pane* split_pane_vertically(struct notcurses *nc, Pane *parent_pane) {
-    // 1. Calculate new dimensions (split the width in half)
-    int new_width = parent_pane->width / 2;
-    int right_start_x = parent_pane->x + new_width;
-    
-    ncplane_resize(parent_pane->nc_plane, 0, 0,                            
-                   parent_pane->height, new_width, 0, 0,  
-                   parent_pane->height, new_width);
-               
-    parent_pane->width = new_width;
+    ncplane_printf_yx(footer, 0, 1, " Cronos | Session: %s | Active Sessions: %d | [ Active Pane: %d ] ", 
+                      session_name, session_cnt, active_pane->id+1);
 
-    // 3. Create the new right pane
-    struct ncplane_options nopts = {
-        .y = parent_pane->y,
-        .x = right_start_x,
-        .rows = parent_pane->height,
-        .cols = parent_pane->width, // (The remaining half)
-        .flags = 0,
-    };
-    
-    struct ncplane *new_nc_plane = ncplane_create(parent_pane->nc_plane, &nopts);
-    ncplane_set_scrolling(new_nc_plane, true);
-
-    // 4. Allocate memory for the new Pane struct
-    Pane *new_pane = malloc(sizeof(Pane));
-    new_pane->nc_plane = new_nc_plane;
-    new_pane->width = parent_pane->width;
-    new_pane->height = parent_pane->height;
-    new_pane->y = parent_pane->y;
-    new_pane->x = right_start_x;
-    
-    // 5. Spawn a brand new PTY and Shell for this pane!
-    new_pane->pty_master_fd = spawn_new_pty(&new_pane->shell_pid);
-    init_terminal_state(&new_pane->state);
-    
-    return new_pane;
+    ncplane_move_top(footer);
+    ncplane_move_top(footer);
+    unsigned int curY, curX;
+    ncplane_cursor_yx(active_pane->nc_plane, &curY, &curX);
+    notcurses_cursor_enable(nc, active_pane->y + curY, active_pane->x + curX);
 }
 
-int run_session(const char *socket_path){
+
+
+void send_resize_packet(int client_sock, int pane_id, int rows, int cols) {
+    CronosPacket resize_pkt;
+    memset(&resize_pkt, 0, sizeof(CronosPacket));
+    resize_pkt.type = PKT_TYPE_COMMAND;
+    resize_pkt.pane_id = pane_id;
+    resize_pkt.data_len = 3;
+    resize_pkt.payload[0] = WINDOW_RESIZE;
+    
+    resize_pkt.payload[1] = (unsigned char)(rows > 255 ? 255 : rows); 
+    resize_pkt.payload[2] = (unsigned char)(cols > 255 ? 255 : cols); 
+    
+    write(client_sock, &resize_pkt, sizeof(CronosPacket));
+}
+
+
+
+int run_session(const char *socket_path, const char *session_name){
 
     int client_sock = socket(AF_UNIX, SOCK_STREAM, 0);
     struct sockaddr_un addr;
@@ -159,11 +196,16 @@ int run_session(const char *socket_path){
         return 1;
     }
     nc_global = nc;
+    write(STDOUT_FILENO, "\033[1 q", 5);
+
+    signal(SIGINT,  cleanup_handler);
+    signal(SIGTERM, cleanup_handler);
     init_terminal_state(&pane_state);
 
     int epoll_fd = epoll_create1(0);
 
     struct ncplane *std = notcurses_stdplane(nc); 
+
     ncplane_set_scrolling(std, true);
     struct epoll_event ev, events[MAX_EVENTS];
 
@@ -173,9 +215,46 @@ int run_session(const char *socket_path){
     
     ev.events = EPOLLIN; ev.data.fd = client_sock; 
     epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_sock, &ev);
+    
+    unsigned int dimy, dimx;
+    ncplane_dim_yx(std, &dimy, &dimx);
 
+    struct ncplane_options fopts = {
+        .y = dimy - 1,
+        .x = 0,
+        .rows = 1,
+        .cols = dimx,
+        .flags = 0,
+    };
+    struct ncplane *footer = ncplane_create(std, &fopts);
+    
+    uint64_t footer_channels = 0;
+    ncchannels_set_fg_rgb8(&footer_channels, 255, 255, 255);
+    ncchannels_set_bg_rgb8(&footer_channels, 40, 40, 200);
+    ncplane_set_base(footer, " ", 0, footer_channels); 
+
+    int session_count = count_active_sessions();
+    ncplane_printf_yx(footer, 0, 1, " Cronos Multiplexer | Session: %s | Active Sessions: %d ", session_name, session_count);
+
+    ncplane_resize(std, 0, 0, dimy - 1, dimx, 0, 0, dimy - 1, dimx);
+    ncplane_set_scrolling(std, true);
+
+    Pane *root_pane = malloc(sizeof(Pane));
+    root_pane->id = 0;
+    root_pane->nc_plane = std;
+    root_pane->height = dimy - 1; 
+    root_pane->width = dimx;
+    root_pane->y = 0;
+    root_pane->x = 0;
+    root_pane->next = NULL;
+    root_pane->state = pane_state;
+
+    active_pane = root_pane;
+    pane_list_head = root_pane; 
+
+    ncplane_set_fg_rgb8(std, 220, 220, 220);   
+    send_resize_packet(client_sock, root_pane->id, root_pane->height, root_pane->width);
     int running = 1; 
-
 
     while (running) {
         int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, -1); 
@@ -186,7 +265,7 @@ int run_session(const char *socket_path){
             uint32_t id;
 
             if (events[i].data.fd == nc_fd && (events[i].events & EPOLLIN)) {  
-                // reads changes in user terminal 
+                
                 while((id = notcurses_get_nblock(nc, &ni))!=0){
                     if(id == (uint32_t)-1) break; 
                     if (ni.evtype == NCTYPE_RELEASE) {
@@ -198,39 +277,332 @@ int run_session(const char *socket_path){
                         running =0; 
                         break; 
                     }
-                    if((id=='B'|| id=='b') && ni.ctrl){
-                        split_pane_vertically(); 
+                    else if((id=='V'|| id=='v') && ni.ctrl){
+                        CronosPacket pkt;
+                        memset(&pkt, 0, sizeof(CronosPacket));
+                        pkt.type = PKT_TYPE_COMMAND;
+                        pkt.pane_id = active_pane ? active_pane->id : 0;
+                        pkt.data_len = 1;
+                        pkt.payload[0] = REQ_SPLIT_VERT; 
+                        write(client_sock, &pkt, sizeof(CronosPacket));
+                        continue;
                     }
+                    else if((id=='B'|| id=='b') && ni.ctrl){
+                        CronosPacket pkt;
+                        memset(&pkt, 0, sizeof(CronosPacket));
+                        pkt.type = PKT_TYPE_COMMAND;
+                        pkt.pane_id = active_pane ? active_pane->id : 0;
+                        pkt.data_len = 1;
+                        pkt.payload[0] = REQ_SPLIT_HORZ; 
+                        write(client_sock, &pkt, sizeof(CronosPacket));
+                        continue;
+                    }    
+                    else if((id=='H'|| id=='h') && ni.ctrl){
+                        Pane *p = pane_list_head;
+                        while(p) {
+                            if (p->x + p->width + 1 == active_pane->x) {
+                                if (active_pane->y >= p->y && active_pane->y < p->y + p->height) {
+                                    active_pane = p;
+                                    break;
+                                }
+                            }
+                            p = p->next;
+                        }
+                        update_active_ui(nc, footer, active_pane, session_name, session_count);
+                        notcurses_render(nc);
+                        continue;
+                    }     
+                    else if((id=='L'|| id=='l') && ni.ctrl){
+                        Pane *p = pane_list_head;
+                        while(p) {
+                            if (active_pane->x + active_pane->width + 1 == p->x) {
+                                if (active_pane->y >= p->y && active_pane->y < p->y + p->height) {
+                                    active_pane = p;
+                                    break;
+                                }
+                            }
+                            p = p->next;
+                        }
+                        update_active_ui(nc, footer, active_pane, session_name, session_count);
+                        notcurses_render(nc);
+                        continue;
+                    }     
+                    else if((id=='J'|| id=='j') && ni.ctrl){
+                        Pane *p = pane_list_head;
+                        while(p) {
+                            if (p->y + p->height + 1 == active_pane->y) {
+                                if (active_pane->x >= p->x && active_pane->x < p->x + p->width) {
+                                    active_pane = p;
+                                    break;
+                                }
+                            }
+                            p = p->next;
+                        }
+                        update_active_ui(nc, footer, active_pane, session_name, session_count);
+                        notcurses_render(nc);
+                        continue;
+                    }     
+                    else if((id=='K'|| id=='k') && ni.ctrl){
+                        Pane *p = pane_list_head;
+                        while(p) {
+                            if (active_pane->y + active_pane->height + 1 == p->y) {
+                                if (active_pane->x >= p->x && active_pane->x < p->x + p->width) {
+                                    active_pane = p;
+                                    break;
+                                }
+                            }
+                            update_active_ui(nc, footer, active_pane, session_name, session_count);
+                            notcurses_render(nc);
+                            p = p->next;
+                        }
+                        continue;
+                    }                                                                                                 
+                    
+                    CronosPacket pkt;
+                    memset(&pkt, 0, sizeof(CronosPacket));
+                    pkt.type = PKT_TYPE_KEYSTROKE;
+                    pkt.pane_id = active_pane ? active_pane->id : 0;
+                    pkt.data_len = 1;
+
+                    int send_packet = 0; 
+
                     if (id == NCKEY_BACKSPACE || id == 0x7F || id == '\b') {
-                        char c = 0x7F;           
-                        write(client_sock, &c, 1);
+                        pkt.payload[0] = 0x7F;
+                        send_packet = 1;
                     }
                     else if (id == NCKEY_ENTER || id == NCKEY_RETURN) {
-                        char c = '\r';                       // Enter
-                        write(client_sock, &c, 1);
+                        pkt.payload[0] = '\r';
+                        send_packet = 1;
                     }
-                    else if(id< 0x80){
-                        char c = (char)id; 
-                        write(client_sock, &c, 1);
+                    else if (id == NCKEY_UP) {
+                        memcpy(pkt.payload, "\x1B[A", 3);
+                        pkt.data_len = 3;
+                        send_packet = 1;
+                    }
+                    else if (id == NCKEY_DOWN) {
+                        memcpy(pkt.payload, "\x1B[B", 3);
+                        pkt.data_len = 3;
+                        send_packet = 1;
+                    }
+                    else if (id == NCKEY_RIGHT) {
+                        memcpy(pkt.payload, "\x1B[C", 3);
+                        pkt.data_len = 3;
+                        send_packet = 1;
+                    }
+                    else if (id == NCKEY_LEFT) {
+                        memcpy(pkt.payload, "\x1B[D", 3);
+                        pkt.data_len = 3;
+                        send_packet = 1;
+                    }
+                    else if(id < 0x80) {
+                        pkt.payload[0] = (char)id; 
+                        send_packet = 1;
+                    }
+                    if (send_packet) {
+                        FILE *dbg = fopen("/tmp/cronos_keys.log", "a");
+                        if (dbg) { fprintf(dbg, "SENT key 0x%02x to pane %d\n", (unsigned char)pkt.payload[0], pkt.pane_id); fclose(dbg); }
+                        write(client_sock, &pkt, sizeof(CronosPacket));
                     }
 
-                    notcurses_render(nc); 
+                    update_active_ui(nc, footer, active_pane, session_name, session_count);
+                    notcurses_render(nc);
                 }
             }
             else if (events[i].data.fd == client_sock ) {
+
                 // reads data in server 
                 if(events[i].events & EPOLLIN){
-                    ssize_t bytes = read(client_sock, buffer, sizeof(buffer)); 
-                    if (bytes > 0) {
-                        for(ssize_t j = 0; j < bytes; j++) {
-                            parse_ansi_byte(&pane_state, buffer[j], std);
+                    CronosPacket pkt; 
+                    ssize_t bytes = recv(client_sock, &pkt, sizeof(CronosPacket), MSG_WAITALL); 
+                    FILE *dbg = fopen("/tmp/cronos_client.log", "a");
+                    if (dbg) { fprintf(dbg, "RECV type=%d pane=%d len=%zu\n", pkt.type, pkt.pane_id, pkt.data_len); fclose(dbg); }
+
+
+                    if (bytes == sizeof(CronosPacket)) {
+                        if (pkt.type == PKT_TYPE_PTY_OUTPUT) {
+                            
+                            struct ncplane *target_ncplane = std;      
+                            TerminalState *target_state = &pane_state; 
+                            
+                            Pane *current = pane_list_head; 
+                            while (current != NULL) {
+                                if (current->id == pkt.pane_id) {
+                                    target_ncplane = current->nc_plane;
+                                    target_state = &current->state;
+                                    break;
+                                }
+                                current = current->next;
+                            }
+
+                            for(size_t j = 0; j < pkt.data_len; j++) {
+                                FILE *dbg = fopen("/tmp/cronos_client.log", "a");
+                                fprintf(dbg, "pane %d got %zu bytes: %.*s\n", pkt.pane_id, pkt.data_len, (int)pkt.data_len, pkt.payload);
+                                fclose(dbg);
+
+                                parse_ansi_byte(target_state, pkt.payload[j], target_ncplane);
+                            }
+
+                            update_active_ui(nc, footer, active_pane, session_name, session_count);
+                            notcurses_render(nc);
                         }
-                        notcurses_render(nc);
+                        
+                        // --- ROUTE 2: Control Commands ---
+                        else if (pkt.type == PKT_TYPE_COMMAND) {
+                            
+                            if (pkt.payload[0] == RES_SPLIT_HORZ_SUCC) {                                
+                                Pane *parent = pane_list_head; 
+                                while(parent){
+                                    if(parent->id == pkt.pane_id) break; 
+                                    parent= parent->next; 
+                                }
+
+                                if (parent && parent->height > 4) {
+                                    int upper_len = parent->height / 2;
+                                    int border_y = parent->y + upper_len;
+                                    int low_start_y = border_y + 1;
+                                    int lower_height = parent->height - upper_len - 1;
+                                    
+                                    
+                                    ncplane_resize(parent->nc_plane, 0, 0,                            
+                                                   upper_len, parent->width, 0, 0,  
+                                                   upper_len, parent->width);
+                                               
+                                    parent->height = upper_len;
+
+                                    struct ncplane_options bopts = {
+                                        .y = border_y,
+                                        .x = parent->x,
+                                        .rows = 1,
+                                        .cols = parent->width,
+                                        .flags = 0,
+                                    };
+                                    
+                                    struct ncplane *border_plane = ncplane_create(std, &bopts);
+                                    uint64_t border_channels = 0;
+                                    ncchannels_set_fg_rgb8(&border_channels, 100, 100, 100); // Gray
+                                    ncplane_set_base(border_plane, "─", 0, border_channels);
+
+                                    struct ncplane_options nopts = {
+                                        .y = low_start_y,
+                                        .x = parent->x,
+                                        .rows = lower_height,
+                                        .cols = parent->width,
+                                        .flags = 0,
+                                    };
+                                    
+                                    struct ncplane *new_nc_plane = ncplane_create(std, &nopts);
+                                    if (new_nc_plane == NULL) {
+                                        FILE *dbg = fopen("/tmp/cronos_debug.log", "a");
+                                        fprintf(dbg, "BUG: Failed to create HORZ plane. Rows: %d\n", lower_height);
+                                        fclose(dbg);
+                                        continue; 
+                                    }
+                                    ncplane_set_scrolling(new_nc_plane, true);
+                                    ncplane_set_fg_rgb8(new_nc_plane, 220, 220, 220);
+
+                                    Pane *new_pane = malloc(sizeof(Pane));
+                                    new_pane->id = pkt.payload[1]; 
+                                    new_pane->nc_plane = new_nc_plane;
+                                    new_pane->width = parent->width;
+                                    new_pane->height = lower_height;
+                                    new_pane->y = low_start_y;
+                                    new_pane->x = parent->x;
+                                    
+                                    init_terminal_state(&new_pane->state);
+                                    
+                                    new_pane->next = parent->next;
+                                    parent->next = new_pane;
+                                    active_pane = new_pane; 
+
+                                    send_resize_packet(client_sock, parent->id, parent->height, parent->width);
+                                    send_resize_packet(client_sock, new_pane->id, new_pane->height, new_pane->width);
+                                    
+                                    update_active_ui(nc, footer, active_pane, session_name, session_count);
+                                    notcurses_render(nc);
+                                }
+                            }
+                            else if (pkt.payload[0] == RES_SPLIT_VERT_SUCC) {                                
+                                Pane *parent = active_pane; 
+                                while(parent){
+                                    if(parent->id == pkt.pane_id) break; 
+                                    parent = parent->next; 
+                                }
+                                if (parent && parent->width >4) {
+                                    int left_width = parent->width / 2;
+                                    int border_x = parent->x + left_width;
+                                    int right_start_x = border_x + 1;
+                                    int right_width = parent->width - left_width - 1;
+                                    
+                                    int pane_height = parent->height;  // Respect footer
+
+                                    
+                                    ncplane_resize(parent->nc_plane, 0, 0,                            
+                                                   pane_height, left_width, 0, 0,  
+                                                   pane_height, left_width);
+                                               
+                                    parent->width = left_width;
+                                    parent->height = pane_height;
+
+                                    struct ncplane_options bopts = {
+                                        .y = parent->y,
+                                        .x = border_x,
+                                        .rows = pane_height,
+                                        .cols = 1,
+                                        .flags = 0,
+                                    };
+                                    
+                                    struct ncplane *border_plane = ncplane_create(std, &bopts);
+                                    uint64_t border_channels = 0;
+                                    ncchannels_set_fg_rgb8(&border_channels, 100, 100, 100); // Gray
+                                    ncplane_set_base(border_plane, "│", 0, border_channels);
+
+                                    struct ncplane_options nopts = {
+                                        .y = parent->y,
+                                        .x = right_start_x,
+                                        .rows = pane_height,
+                                        .cols = right_width,
+                                        .flags = 0,
+                                    };
+                                    
+                                    struct ncplane *new_nc_plane = ncplane_create(std, &nopts);
+                                    if (new_nc_plane == NULL) {
+                                        FILE *dbg = fopen("/tmp/cronos_debug.log", "a");
+                                        fprintf(dbg, "BUG: Failed to create VERT plane. Cols: %d\n", right_width);
+                                        fclose(dbg);
+                                        continue; 
+                                    }
+                                    ncplane_set_scrolling(new_nc_plane, true);
+                                    ncplane_set_fg_rgb8(new_nc_plane, 220, 220, 220);
+
+                                    Pane *new_pane = malloc(sizeof(Pane));
+                                    new_pane->id = pkt.payload[1]; 
+                                    new_pane->nc_plane = new_nc_plane;
+                                    new_pane->width = right_width;
+                                    new_pane->height = pane_height;
+                                    new_pane->y = parent->y;
+                                    new_pane->x = right_start_x;
+                                    
+                                    init_terminal_state(&new_pane->state);
+                                    
+                                    new_pane->next = parent->next;
+                                    parent->next = new_pane;
+                                    active_pane = new_pane; 
+
+                                    send_resize_packet(client_sock, parent->id, parent->height, parent->width);
+                                    send_resize_packet(client_sock, new_pane->id, new_pane->height, new_pane->width);
+                                    
+                                    update_active_ui(nc, footer, active_pane, session_name, session_count);
+                                    notcurses_render(nc);
+                                }
+                            }
+                        }
                     }
-                    else if (bytes == 0) running = 0;
+                    else if (bytes == 0) {
+                        running = 0; 
+                    }
                 }
-                if(events[i].events & (EPOLLHUP|EPOLLERR)){
-                    running =0; 
+                if (events[i].events & (EPOLLHUP | EPOLLERR)) {
+                    running = 0; 
                 }
             }
         }
@@ -321,6 +693,10 @@ int main(int argc, char *argv[]) {
         print_usage(argv[0]);
         return 0;
     }
+    if(argc>1 && (strcmp(argv[1], "--inst")==0||strcmp(argv[1], "-i")==0)){
+        print_short(argv[0]);
+        return 0;
+    }
     if(argc<2){
         print_usage(argv[0]);
         return 1;  
@@ -372,12 +748,13 @@ int main(int argc, char *argv[]) {
             execvp(args[0], args);
             perror("execvp failed to launch server binary");
             exit(1);
-        } else if (pid > 0) {
-            // Give the server daemon a brief window to complete initialization
+        } 
+        else if (pid > 0) {
             usleep(200000); 
-            waitpid(pid, NULL, WNOHANG); // Clean up the immediate fork zombie
-            return run_session(socket_path);
-        } else {
+            waitpid(pid, NULL, WNOHANG); 
+            return run_session(socket_path, session_name);
+        } 
+        else {
             perror("Fork failed");
             return 1;
         }
@@ -387,7 +764,7 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Error: Session '%s' does not exist.\n", session_name);
             return 1;
         }
-        return run_session(socket_path);
+        return run_session(socket_path, session_name);
     } 
     else if (strcmp(cmd, "kill") == 0) {
         FILE *f = fopen(pid_path, "r");
