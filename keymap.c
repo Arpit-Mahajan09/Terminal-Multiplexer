@@ -1,8 +1,10 @@
-#include "cronos.h"
-#include "pane.h"
-#include "guide.h"     
-#include "session_ui.h"
-#include "window.h"
+#include "headers/cronos.h"
+#include "headers/pane.h"
+#include "headers/guide.h"     
+#include "headers/session_ui.h"
+#include "headers/window.h"
+#include "headers/guide.h"     
+
 #include <stdint.h>
 #include <stdio.h> 
 #include <notcurses/notcurses.h>
@@ -109,7 +111,6 @@ void send_keystroke_to_server(ClientContext *ctx, uint32_t id) {
 
 
 
-#include "guide.h"     
 Action parse_action_name(const char *name) {
     if (strcmp(name, "detach") == 0)       return ACTION_DETACH;
     if (strcmp(name, "split_vert") == 0)   return ACTION_SPLIT_VERT;

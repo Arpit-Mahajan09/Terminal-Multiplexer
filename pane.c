@@ -4,9 +4,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "cronos.h"
-#include "pane.h"      
-#include "parser.h"    
+#include "headers/cronos.h"
+#include "headers/pane.h"      
+#include "headers/parser.h"    
 
 void update_active_ui(ClientContext *ctx) {
     if (!ctx->footer || !ctx->active_pane) return;

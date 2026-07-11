@@ -1,6 +1,6 @@
-#include "window.h"
-#include "pane.h"
-#include "parser.h"
+#include "headers/window.h"
+#include "headers/pane.h"
+#include "headers/parser.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>

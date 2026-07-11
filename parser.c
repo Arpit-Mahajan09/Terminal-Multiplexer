@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <notcurses/notcurses.h>
-#include "cronos.h"
+#include "headers/cronos.h"
 
 // This file acts as a state machine that would read the ANSI characters from server 
 // before sending them to the frontend

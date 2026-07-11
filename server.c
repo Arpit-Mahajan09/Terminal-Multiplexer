@@ -14,7 +14,7 @@
 #include <sys/un.h>
 
 #include <errno.h> 
-#include "cronos.h"
+#include "headers/cronos.h"
 #include <signal.h>
 
 #define MAX_PANES 10

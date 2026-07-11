@@ -1,5 +1,5 @@
 #include <notcurses/notcurses.h>
-#include "parser.h"
+#include "headers/parser.h"
 
 #define PENDING_BUF_SIZE 65536
 #define MAX_KEYBINDINGS 64

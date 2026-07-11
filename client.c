@@ -17,12 +17,12 @@
 #include <errno.h> 
 #include <notcurses/notcurses.h>
 
-#include "guide.h"
-#include "pane.h"
-#include "keymap.h"
-#include "parser.h"
-#include "window.h"
-#include "session_ui.h"
+#include "headers/guide.h"
+#include "headers/pane.h"
+#include "headers/keymap.h"
+#include "headers/parser.h"
+#include "headers/window.h"
+#include "headers/session_ui.h"
 
 Pane *pane_list_head = NULL;
 Pane *pane_at_yx(int y, int x) {
