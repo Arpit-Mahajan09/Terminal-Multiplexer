@@ -7,13 +7,14 @@ BINDIR = $(PREFIX)/bin
 
 CLIENT_TARGET = cronos
 SERVER_TARGET = cronos-server
+CLIENT_SRCS = client.c pane.c keymap.c guide.c 
 
 .PHONY: all clean install uninstall
 
 all: $(CLIENT_TARGET) $(SERVER_TARGET)
 
-$(CLIENT_TARGET): client.c cronos.h
-	$(CC) $(CFLAGS) client.c -o $(CLIENT_TARGET) $(LIBS)
+$(CLIENT_TARGET): $(CLIENT_SRCS) cronos.h
+	$(CC) $(CFLAGS) $(CLIENT_SRCS) -o $(CLIENT_TARGET) $(LIBS)
 
 $(SERVER_TARGET): server.c cronos.h
 	$(CC) $(CFLAGS) server.c -o $(SERVER_TARGET) $(LIBS)

@@ -2,28 +2,10 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <notcurses/notcurses.h>
+#include "cronos.h"
 
-
-#define MAX_ANSI_PARAMS 16
 // This file acts as a state machine that would read the ANSI characters from server 
 // before sending them to the frontend
-
-typedef enum {
-    STATE_GROUND,
-    STATE_ESCAPE,
-    STATE_CSI_ENTRY,
-    STATE_CSI_PARAM, 
-    STATE_OSC,         
-    STATE_OSC_ESCAPE
-} AnsiState;
-
-typedef struct {
-    AnsiState current_state;
-    int params[MAX_ANSI_PARAMS]; 
-    int param_count;
-    int current_param_value;     
-} TerminalState;
-
 
 void init_terminal_state(TerminalState *state) {
     state->current_state = STATE_GROUND;
@@ -32,6 +14,11 @@ void init_terminal_state(TerminalState *state) {
     for (int i = 0; i<MAX_ANSI_PARAMS; i++) {
         state->params[i] = 0;
     }
+
+    state->scrollback_head = 0;
+    state->scrollback_count = 0;
+    state->scroll_offset = 0;
+    memset(state->scrollback, 0, sizeof(state->scrollback));
 }
 
 
@@ -184,7 +171,31 @@ void parse_ansi_byte(TerminalState *state, char ch, struct ncplane *pane) {
                 ncplane_cursor_yx(pane, &y, &x);
                 ncplane_cursor_move_yx(pane, y, 0);
             } else if (ch == '\n') {    // Move cursor down one row
-                ncplane_putchar(pane, '\n');
+                    unsigned int y, x, dimy, dimx;
+                    ncplane_cursor_yx(pane, &y, &x);
+                    ncplane_dim_yx(pane, &dimy, &dimx);
+
+                    if (y == dimy - 1) {
+                        // This newline is about to trigger a scroll -- save row 0 first
+                        char *dst = state->scrollback[(state->scrollback_head + state->scrollback_count) % SCROLLBACK_MAX_LINES];
+                        unsigned int cols_to_copy = (dimx < SCROLLBACK_LINE_WIDTH - 1) ? dimx : SCROLLBACK_LINE_WIDTH - 1;
+                        for (unsigned int col = 0; col < cols_to_copy; col++) {
+                            uint32_t egc_cell = 0; // placeholder; use ncplane_at_yx below
+                            (void)egc_cell;
+                            char *egc = ncplane_at_yx(pane, 0, col, NULL, NULL);
+                            dst[col] = (egc && egc[0]) ? egc[0] : ' ';
+                            if (egc) free(egc);
+                        }
+                        dst[cols_to_copy] = '\0';
+
+                        if (state->scrollback_count < SCROLLBACK_MAX_LINES) {
+                            state->scrollback_count++;
+                        } else {
+                            state->scrollback_head = (state->scrollback_head + 1) % SCROLLBACK_MAX_LINES;
+                        }
+                    }
+                    ncplane_putchar(pane, '\n');
+
             } else if (ch == '\b') {    // Move cursor left one column
                 unsigned int y, x;
                 ncplane_cursor_yx(pane, &y, &x);

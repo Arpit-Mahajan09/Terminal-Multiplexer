@@ -184,6 +184,12 @@ char global_socket_path[256];
 char global_pid_path[256];
 
 void handle_sigterm(int sig) {
+    for (int p = 0; p < next_pane_id; p++) {
+        if (panes[p].is_active) {
+            kill(-panes[p].shell_pid, SIGTERM);  
+        }
+    }
+
     unlink(global_socket_path);
     unlink(global_pid_path);
     _exit(0);
@@ -252,7 +258,7 @@ int main(int argc, char* argv[]) {
         int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, -1); 
 
         FILE *edbg = fopen("/tmp/cronos_epoll.log", "a");
-        if (edbg) fprintf(edbg, "epoll_wait -> %d events\n", num_events);
+        if (edbg) fcntl(fileno(edbg), F_SETFD, FD_CLOEXEC);
 
         for (int i = 0; i < num_events; i++) {
             int active_fd = events[i].data.fd;
