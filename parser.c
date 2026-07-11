@@ -196,11 +196,22 @@ void parse_ansi_byte(TerminalState *state, char ch, struct ncplane *pane) {
                     }
                     ncplane_putchar(pane, '\n');
 
-            } else if (ch == '\b') {    // Move cursor left one column
+            } 
+            else if (ch == '\b') {    // Move cursor left one column
                 unsigned int y, x;
                 ncplane_cursor_yx(pane, &y, &x);
                 if (x > 0) ncplane_cursor_move_yx(pane, y, x - 1);
-            } else {
+            } 
+            else if (ch == '\t') {
+                unsigned int y, x, dimy, dimx;
+                ncplane_cursor_yx(pane, &y, &x);
+                ncplane_dim_yx(pane, &dimy, &dimx);
+                unsigned int next_tab = (x + 8) & ~7;  // next tab stop (every 8 cols)
+                if (next_tab < dimx) {
+                    ncplane_cursor_move_yx(pane, y, next_tab);
+                }
+            }
+            else {
                 ncplane_putchar(pane, ch);
             }
             break;
@@ -225,34 +236,25 @@ void parse_ansi_byte(TerminalState *state, char ch, struct ncplane *pane) {
         case STATE_CSI_ENTRY:
         case STATE_CSI_PARAM:
             if (ch >= '0' && ch <= '9') {
-                // Build the numeric parameter
                 state->current_state = STATE_CSI_PARAM;
                 state->current_param_value = (state->current_param_value * 10) + (ch - '0');
             } 
             else if (ch == ';') {
-                // Parameter separator, save the current param and move to the next
                 if (state->param_count < MAX_ANSI_PARAMS) {
                     state->params[state->param_count++] = state->current_param_value;
                 }
-                state->current_param_value = 0; // Reset for the next parameter
+                state->current_param_value = 0; 
                 state->current_state = STATE_CSI_PARAM;
             } 
             else if (ch >= 0x40 && ch <= 0x7E) {
-                // Final character (a-z, A-Z). This terminates the sequence.
-                // Save the final parameter first
                 if (state->param_count < MAX_ANSI_PARAMS) {
                     state->params[state->param_count++] = state->current_param_value;
                 }
                 
-                // Execute the accumulated sequence
                 execute_csi_sequence(state, ch, pane);
-                
-                // Return to normal text processing
                 state->current_state = STATE_GROUND;
             } 
             else if (ch == ':') {
-                // Kitty protocol sub-parameter separator (e.g. "1:3" in "5:3u")
-                // Save current value, discard the sub-value that follows
                 if (state->param_count < MAX_ANSI_PARAMS) {
                     state->params[state->param_count++] = state->current_param_value;
                 }
@@ -260,11 +262,9 @@ void parse_ansi_byte(TerminalState *state, char ch, struct ncplane *pane) {
                 state->current_state = STATE_CSI_PARAM;
             }
             else if (ch == '?' || ch == '>' || ch == '<' || ch == '=') {
-                //stay in param state
+                
             }
             else {
-                // Unexpected character (e.g., C0 control character in the middle of a sequence)
-                // Robust parsers handle this differently, but returning to ground is a safe fallback
                 state->current_state = STATE_GROUND;
             }
             break;

@@ -1,7 +1,6 @@
-#define _GNU_SOURCE
 #define _XOPEN_SOURCE 600 
 #define HISTORY_SIZE (1024 * 64)    
-
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -257,21 +256,21 @@ int main(int argc, char* argv[]) {
     while (running) {
         int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, -1); 
 
-        FILE *edbg = fopen("/tmp/cronos_epoll.log", "a");
-        if (edbg) fcntl(fileno(edbg), F_SETFD, FD_CLOEXEC);
+        // FILE *edbg = fopen("/tmp/cronos_epoll.log", "a");
+        // if (edbg) fcntl(fileno(edbg), F_SETFD, FD_CLOEXEC);
 
         for (int i = 0; i < num_events; i++) {
             int active_fd = events[i].data.fd;
 
-            if (edbg) {
-                fprintf(edbg, "  fd=%d flags=%s%s%s%s  (masterFd=%d server_sock=%d client_sock=%d)\n",
-                active_fd,
-                (events[i].events & EPOLLIN)  ? "IN "  : "",
-                (events[i].events & EPOLLOUT) ? "OUT " : "",
-                (events[i].events & EPOLLHUP) ? "HUP " : "",
-                (events[i].events & EPOLLERR) ? "ERR " : "",
-                masterFd, server_sock, client_sock);
-            }
+            // if (edbg) {
+            //     fprintf(edbg, "  fd=%d flags=%s%s%s%s  (masterFd=%d server_sock=%d client_sock=%d)\n",
+            //     active_fd,
+            //     (events[i].events & EPOLLIN)  ? "IN "  : "",
+            //     (events[i].events & EPOLLOUT) ? "OUT " : "",
+            //     (events[i].events & EPOLLHUP) ? "HUP " : "",
+            //     (events[i].events & EPOLLERR) ? "ERR " : "",
+            //     masterFd, server_sock, client_sock);
+            // }
 
             if (active_fd == server_sock) {
                 if (events[i].events & EPOLLIN) {
@@ -304,8 +303,8 @@ int main(int argc, char* argv[]) {
                                 w = write(panes[target_id].master_fd, pkt.payload, pkt.data_len);
                             }
 
-                            FILE *dbg = fopen("/tmp/cronos_server.log", "a");
-                            if (dbg) { fprintf(dbg, "WROTE %zd bytes to pane %d master_fd (errno=%d)\n", w, target_id, errno); fclose(dbg); }
+                        //     FILE *dbg = fopen("/tmp/cronos_server.log", "a");
+                        //     if (dbg) { fprintf(dbg, "WROTE %zd bytes to pane %d master_fd (errno=%d)\n", w, target_id, errno); fclose(dbg); }
                         }
                         else if (pkt.type == PKT_TYPE_COMMAND) {
                             if (pkt.payload[0] == WINDOW_RESIZE) {
@@ -353,6 +352,35 @@ int main(int argc, char* argv[]) {
                                 if (target_id > 0 && target_id < next_pane_id && panes[target_id].is_active) {
                                     kill(-panes[target_id].shell_pid, SIGTERM);
                                 }
+                            }
+                            else if (pkt.payload[0] == REQ_NEW_WINDOW) {
+
+                                int new_pane_id;
+                                int new_fd = spawn_new_pty(&new_pane_id);
+
+                                if (new_fd != -1) {
+                                    struct epoll_event ev_pty;
+                                    ev_pty.events   = EPOLLIN;
+                                    ev_pty.data.fd  = new_fd;
+                                    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_fd, &ev_pty);
+
+                                    CronosPacket res;
+                                    memset(&res, 0, sizeof(res));
+                                    res.type       = PKT_TYPE_COMMAND;
+                                    res.data_len   = 2;
+                                    res.payload[0] = RES_NEW_WINDOW_SUCC;
+                                    res.payload[1] = (unsigned char)new_pane_id;
+                                    write(client_sock, &res, sizeof(res));
+                                }
+                            }
+                            else if (pkt.payload[0] == REQ_RENAME_SESSION) {
+                                char new_name[128];
+
+                                strncpy(new_name, &pkt.payload[1], sizeof(new_name) - 1);
+                                snprintf(global_socket_path, sizeof(global_socket_path),
+                                        "/tmp/cronos_%s.sock", new_name);
+                                snprintf(global_pid_path, sizeof(global_pid_path),
+                                        "/tmp/cronos_%s.pid", new_name);
                             }
                         }
                     } 
@@ -421,7 +449,7 @@ int main(int argc, char* argv[]) {
                 }
             } 
         } 
-        if (edbg) fclose(edbg);
+        //if (edbg) fclose(edbg);
     }
     if (client_sock!=-1) close(client_sock);
     close(server_sock);

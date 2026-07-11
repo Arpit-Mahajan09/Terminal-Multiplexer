@@ -21,6 +21,10 @@
 #define WINDOW_RESIZE        5
 #define RES_PANE_CLOSED 6
 #define REQ_CLOSE_PANE 7
+#define REQ_NEW_WINDOW       8   
+#define RES_NEW_WINDOW_SUCC  9   
+#define REQ_RENAME_SESSION   10  
+
 
 #include <stddef.h>
 #include <stdint.h>
@@ -43,6 +47,11 @@ typedef enum {
     ACTION_SCROLL_UP,
     ACTION_SCROLL_DOWN,
     ACTION_SCROLL_RESET,
+    ACTION_NEW_WINDOW,
+    ACTION_NEXT_WINDOW,
+    ACTION_PREV_WINDOW,
+    ACTION_RENAME_WINDOW,
+    ACTION_SESSION_MENU,
 } Action;
 
 typedef enum {
@@ -90,11 +99,11 @@ typedef struct Pane {
     TerminalState state;       
     
     struct ncplane *nc_plane;  
-    struct ncplane *border_plane; // NEW: Track the border!
-    int width;
-    int height;
-    int y;
-    int x;
+    struct ncplane *border_plane; 
+    struct ncplane *scroll_overlay;
+    
+    int width, height, y, x;
+    int border_y, border_x;
 
     char pending_buf[PENDING_BUF_SIZE];
     size_t pending_len;
@@ -102,6 +111,14 @@ typedef struct Pane {
 
     struct Pane *next;         
 } Pane;
+
+typedef struct Window {
+    int id;
+    char name[32];
+    Pane *pane_list_head;
+    Pane *active_pane;
+    struct Window *next;
+} Window;
 
 
 typedef struct {
@@ -115,11 +132,21 @@ typedef struct {
     struct notcurses *nc;
     struct ncplane *std;
     struct ncplane *footer;
+
+    Window *window_list_head;
+    Window *active_window;
+    int next_window_id;
+
     Pane *pane_list_head;
     Pane *active_pane;
+
     int client_sock;
     char session_name[128];
     int session_count;
 } ClientContext;
+
+void send_resize_packet(int client_sock, int pane_id, int rows, int cols);
+Pane *find_pane_global(ClientContext *ctx, int pane_id);
+
 
 #endif

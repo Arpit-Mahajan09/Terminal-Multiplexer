@@ -1,5 +1,8 @@
 #include "cronos.h"
 #include "pane.h"
+#include "guide.h"     
+#include "session_ui.h"
+#include "window.h"
 #include <stdint.h>
 #include <stdio.h> 
 #include <notcurses/notcurses.h>
@@ -34,7 +37,14 @@ void load_default_keymap(void) {
     bind_key(NCKEY_PGUP, 0, 0, ACTION_SCROLL_UP);
     bind_key(NCKEY_PGDOWN, 0, 0, ACTION_SCROLL_DOWN);
 
+    bind_key('n', 1, 0, ACTION_NEW_WINDOW);   bind_key('N', 1, 0, ACTION_NEW_WINDOW);
+    bind_key('r', 1, 0, ACTION_RENAME_WINDOW); bind_key('R', 1, 0, ACTION_RENAME_WINDOW);
+    bind_key('a', 1, 0, ACTION_SESSION_MENU); bind_key('A', 1, 0, ACTION_SESSION_MENU);
+    bind_key(']', 1, 0, ACTION_NEXT_WINDOW);
+    bind_key('[', 1, 0, ACTION_PREV_WINDOW);
 }
+
+
 int parse_key_name(const char *name, uint32_t *key_out) {
     if (strcmp(name, "left") == 0)  { *key_out = NCKEY_LEFT;  return 1; }
     if (strcmp(name, "right") == 0) { *key_out = NCKEY_RIGHT; return 1; }
@@ -99,6 +109,7 @@ void send_keystroke_to_server(ClientContext *ctx, uint32_t id) {
 
 
 
+#include "guide.h"     
 Action parse_action_name(const char *name) {
     if (strcmp(name, "detach") == 0)       return ACTION_DETACH;
     if (strcmp(name, "split_vert") == 0)   return ACTION_SPLIT_VERT;
@@ -112,6 +123,7 @@ Action parse_action_name(const char *name) {
     if (strcmp(name, "resize_right") == 0) return ACTION_RESIZE_RIGHT;
     if (strcmp(name, "resize_up") == 0)    return ACTION_RESIZE_UP;
     if (strcmp(name, "resize_down") == 0)  return ACTION_RESIZE_DOWN;
+    
     return ACTION_NONE;
 }
 
@@ -164,24 +176,55 @@ int process_user_action(ClientContext *ctx, uint32_t id, ncinput *ni) {
                 handle_pane_resize(ctx, act);
                 break;
 
+            case ACTION_NEW_WINDOW:
+                window_create(ctx);  
+                break;
+
+            case ACTION_NEXT_WINDOW:
+                if (ctx->active_window)
+                    ctx->active_window->active_pane = ctx->active_pane;
+                window_next(ctx);
+                ctx_sync_window(ctx);
+                break;
+
+            case ACTION_PREV_WINDOW:
+                if (ctx->active_window)
+                    ctx->active_window->active_pane = ctx->active_pane;
+                window_prev(ctx);
+                ctx_sync_window(ctx);
+                break;
+
+            case ACTION_RENAME_WINDOW: {
+                window_rename(ctx, "renamed");  
+                break;
+            }
+
+            case ACTION_SESSION_MENU:
+                show_session_ui(ctx);
+                window_render_bar(ctx);
+                notcurses_render(ctx->nc);
+                break;
+
             case ACTION_SCROLL_UP:
-                if (ctx->active_pane->state.scroll_offset < ctx->active_pane->state.scrollback_count - ctx->active_pane->height) {
+                if (!ctx->active_pane) break;
+                if (!ctx->active_pane->scroll_overlay)
+                    enter_scrollback(ctx, ctx->active_pane);
+                else {
                     ctx->active_pane->state.scroll_offset++;
                     render_scrollback_view(ctx->active_pane);
-                    notcurses_render(ctx->nc);
                 }
+                notcurses_render(ctx->nc);
                 break;
-                
+
             case ACTION_SCROLL_DOWN:
-                if (ctx->active_pane->state.scroll_offset > 0) {
+                if (!ctx->active_pane || !ctx->active_pane->scroll_overlay) break;
+                if (ctx->active_pane->state.scroll_offset > 1) {
                     ctx->active_pane->state.scroll_offset--;
-                    if (ctx->active_pane->state.scroll_offset == 0) {
-                        exit_scrollback(ctx->active_pane);
-                    } else {
-                        render_scrollback_view(ctx->active_pane);
-                    }
-                    notcurses_render(ctx->nc);
+                    render_scrollback_view(ctx->active_pane);
+                } else {
+                    exit_scrollback(ctx->active_pane);
                 }
+                notcurses_render(ctx->nc);
                 break;
                 
             default:

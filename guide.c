@@ -1,27 +1,13 @@
 #include <notcurses/notcurses.h>
-#include "parser.c"
+#include "parser.h"
 
 #define PENDING_BUF_SIZE 65536
 #define MAX_KEYBINDINGS 64
 
 
-KeyBinding keymap[MAX_KEYBINDINGS];
-int keymap_count = 0;
-
-
-Action resolve_action(uint32_t id, ncinput *ni) {
-    for (int i = 0; i < keymap_count; i++) {
-        if (keymap[i].key == id &&
-            keymap[i].needs_ctrl == ni->ctrl &&
-            keymap[i].needs_alt == ni->alt) {
-            return keymap[i].action;
-        }
-    }
-    return ACTION_NONE;
-}
-
-
 void print_usage(char *prog){
+    (void)prog;
+
     printf("Cronos Terminal Multiplexer CLI\n\n");
     printf("Usage:\n");
     printf("  %s new <name>      - Create and attach to a new background session\n", prog);
@@ -36,14 +22,17 @@ void print_usage(char *prog){
 }
 
 void print_short(char *prog){
+    (void)prog;
+
     printf("Cronos Terminal Multiplexer CLI\n\n");
     printf("Shortcut Keys: \n");
     
     printf("  Split Vertically       :  Ctrl + v\n");
     printf("  Split Horizontally     :  Ctrl + b\n");
-    printf("  Move Focus Right       :  Ctrl + h\n");
+    printf("  Move Focus Left        :  Ctrl + h\n");
     printf("  Move Focus Above       :  Ctrl + j\n"); 
     printf("  Move Focus Below       :  Ctrl + k\n\n");
+    printf("  Move Focus Rihgt       :  Ctrl + l\n\n");
 
     printf("  Resize Pane            :  Alt + Arrow Keys\n");
     printf("  Scroll Pane History    :  Page Up / Page Down\n");
@@ -53,82 +42,68 @@ void print_short(char *prog){
     printf("  Close Terminal       :  Ctrl + q\n\n");
 }
 
-void render_scrollback_view(Pane *p) {
-    TerminalState *st = &p->state;
-    ncplane_erase(p->nc_plane);
 
-    int total_lines = st->scrollback_count;
+
+void render_scrollback_view(Pane *p) {
+    if (!p->scroll_overlay) return;
+    ncplane_erase(p->scroll_overlay);
+
+    int total  = p->state.scrollback_count;
     int visible = p->height;
-    int start = total_lines - visible - st->scroll_offset;
-    if (start < 0) start = 0;
+
+    int last_line = total - (p->state.scroll_offset - 1) * visible;
+    int first_line = last_line - visible;
+    if (first_line < 0) first_line = 0;
 
     for (int row = 0; row < visible; row++) {
-        int line_idx = start + row;
-        if (line_idx >= total_lines) break;
-        char *line = st->scrollback[(st->scrollback_head + line_idx) % SCROLLBACK_MAX_LINES];
-        ncplane_putstr_yx(p->nc_plane, row, 0, line);
+        int idx = first_line + row;
+        if (idx >= total) break;
+        char *line = p->state.scrollback[
+            (p->state.scrollback_head + idx) % SCROLLBACK_MAX_LINES];
+        ncplane_putstr_yx(p->scroll_overlay, row, 0, line);
     }
+
+    uint64_t ch = 0;
+    ncchannels_set_fg_rgb8(&ch, 0,   0,   0);
+    ncchannels_set_bg_rgb8(&ch, 100, 100, 200);
+    int saved_y, saved_x;
+
+    ncplane_cursor_yx(p->scroll_overlay, (unsigned*)&saved_y, (unsigned*)&saved_x);
+    ncplane_set_channels(p->scroll_overlay, ch);
+    ncplane_printf_yx(p->scroll_overlay, 0, 0,
+        " SCROLL  offset=%d/%d  PgDn=forward  ESC=live ",
+        p->state.scroll_offset, total / visible + 1);
+
+    ncplane_set_fg_default(p->scroll_overlay);
+    ncplane_set_bg_default(p->scroll_overlay);
+}
+
+void enter_scrollback(ClientContext *ctx, Pane *p) {
+    if (p->scroll_overlay) return;  // already scrolling
+
+    unsigned int rows, cols;
+    ncplane_dim_yx(p->nc_plane, &rows, &cols);
+
+    struct ncplane_options opts = {
+        .y = p->y, .x = p->x,
+        .rows = rows, .cols = cols,
+    };
+    p->scroll_overlay = ncplane_create(ctx->std, &opts);
+    ncplane_move_top(p->scroll_overlay);
+    ncplane_set_scrolling(p->scroll_overlay, false);
+
+    uint64_t bg = 0;
+    ncchannels_set_fg_rgb8(&bg, 220, 220, 220);
+    ncchannels_set_bg_rgb8(&bg, 10,  10,  10);
+    ncplane_set_base(p->scroll_overlay, " ", 0, bg);
+
+    p->state.scroll_offset = 1;
+    render_scrollback_view(p);
 }
 
 void exit_scrollback(Pane *p) {
+    if (!p->scroll_overlay) return;
+    ncplane_destroy(p->scroll_overlay);
+    p->scroll_overlay = NULL;
     p->state.scroll_offset = 0;
-    ncplane_erase(p->nc_plane);
-    ncplane_cursor_move_yx(p->nc_plane, 0, 0);
-
-    for (size_t j = 0; j < p->pending_len; j++) {
-        parse_ansi_byte(&p->state, p->pending_buf[j], p->nc_plane);
-    }
-    p->pending_len = 0;
-}
-
-
-void bind_key(uint32_t key, int ctrl, int alt, Action action) {
-    if (keymap_count >= MAX_KEYBINDINGS) return;
-    keymap[keymap_count].key = key;
-    keymap[keymap_count].needs_ctrl = ctrl;
-    keymap[keymap_count].needs_alt = alt;
-    keymap[keymap_count].action = action;
-    keymap_count++;
-}
-
-void load_default_keymap(void) {
-    bind_key('q', 1, 0, ACTION_DETACH);      bind_key('Q', 1, 0, ACTION_DETACH);
-    bind_key('v', 1, 0, ACTION_SPLIT_VERT);  bind_key('V', 1, 0, ACTION_SPLIT_VERT);
-    bind_key('b', 1, 0, ACTION_SPLIT_HORZ);  bind_key('B', 1, 0, ACTION_SPLIT_HORZ);
-    bind_key('h', 1, 0, ACTION_FOCUS_LEFT);  bind_key('H', 1, 0, ACTION_FOCUS_LEFT);
-    bind_key('l', 1, 0, ACTION_FOCUS_RIGHT); bind_key('L', 1, 0, ACTION_FOCUS_RIGHT);
-    bind_key('j', 1, 0, ACTION_FOCUS_DOWN);  bind_key('J', 1, 0, ACTION_FOCUS_DOWN);
-    bind_key('k', 1, 0, ACTION_FOCUS_UP);    bind_key('K', 1, 0, ACTION_FOCUS_UP);
-    bind_key('w', 1, 0, ACTION_CLOSE_PANE);  bind_key('W', 1, 0, ACTION_CLOSE_PANE);
-    bind_key(NCKEY_LEFT,  0, 1, ACTION_RESIZE_LEFT);
-    bind_key(NCKEY_RIGHT, 0, 1, ACTION_RESIZE_RIGHT);
-    bind_key(NCKEY_UP,    0, 1, ACTION_RESIZE_UP);
-    bind_key(NCKEY_DOWN,  0, 1, ACTION_RESIZE_DOWN);
-    bind_key(NCKEY_PGUP, 0, 0, ACTION_SCROLL_UP);
-    bind_key(NCKEY_PGDOWN, 0, 0, ACTION_SCROLL_DOWN);
-
-}
-int parse_key_name(const char *name, uint32_t *key_out) {
-    if (strcmp(name, "left") == 0)  { *key_out = NCKEY_LEFT;  return 1; }
-    if (strcmp(name, "right") == 0) { *key_out = NCKEY_RIGHT; return 1; }
-    if (strcmp(name, "up") == 0)    { *key_out = NCKEY_UP;    return 1; }
-    if (strcmp(name, "down") == 0)  { *key_out = NCKEY_DOWN;  return 1; }
-    if (strlen(name) == 1) { *key_out = (uint32_t)name[0]; return 1; }
-    return 0;
-}
-
-Action parse_action_name(const char *name) {
-    if (strcmp(name, "detach") == 0)       return ACTION_DETACH;
-    if (strcmp(name, "split_vert") == 0)   return ACTION_SPLIT_VERT;
-    if (strcmp(name, "split_horz") == 0)   return ACTION_SPLIT_HORZ;
-    if (strcmp(name, "focus_left") == 0)   return ACTION_FOCUS_LEFT;
-    if (strcmp(name, "focus_right") == 0)  return ACTION_FOCUS_RIGHT;
-    if (strcmp(name, "focus_up") == 0)     return ACTION_FOCUS_UP;
-    if (strcmp(name, "focus_down") == 0)   return ACTION_FOCUS_DOWN;
-    if (strcmp(name, "close_pane") == 0)   return ACTION_CLOSE_PANE;
-    if (strcmp(name, "resize_left") == 0)  return ACTION_RESIZE_LEFT;
-    if (strcmp(name, "resize_right") == 0) return ACTION_RESIZE_RIGHT;
-    if (strcmp(name, "resize_up") == 0)    return ACTION_RESIZE_UP;
-    if (strcmp(name, "resize_down") == 0)  return ACTION_RESIZE_DOWN;
-    return ACTION_NONE;
 }

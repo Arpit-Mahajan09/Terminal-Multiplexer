@@ -5,36 +5,57 @@
 #include <stdint.h>
 
 #include "cronos.h"
+#include "pane.h"      
+#include "parser.h"    
+
+void update_active_ui(ClientContext *ctx) {
+    if (!ctx->footer || !ctx->active_pane) return;
+
+    Pane *p = ctx->pane_list_head;
+    while (p) {
+        uint64_t channels = 0;
+        ncchannels_set_fg_rgb8(&channels, 220, 220, 220);
+
+        if (p == ctx->active_pane) {
+            ncchannels_set_bg_rgb8(&channels, 30, 30, 50);
+        } else {
+            ncchannels_set_bg_rgb8(&channels, 0, 0, 0);
+        }
+        ncplane_set_base(p->nc_plane, " ", 0, channels);
+        p = p->next;
+    }
+
+    ncplane_printf_yx(ctx->footer, 0, 1, " Cronos | Session: %s | Active Sessions: %d | [ Active Pane: %d ] ",
+                       ctx->session_name, ctx->session_count, ctx->active_pane->id + 1);
+
+    ncplane_move_top(ctx->footer);
+    ncplane_move_top(ctx->footer);
+
+    unsigned int curY, curX;
+    ncplane_cursor_yx(ctx->active_pane->nc_plane, &curY, &curX);
+    notcurses_cursor_enable(ctx->nc, ctx->active_pane->y + curY, ctx->active_pane->x + curX);
+}
 
 void handle_pty_output(ClientContext *ctx, CronosPacket *pkt){
-    struct ncplane *target_ncplane = ctx->std;      
-    TerminalState *target_state = NULL; 
-    Pane *current = ctx->pane_list_head; 
 
-    while (current != NULL) {
-        if (current->id == pkt->pane_id) {
-            target_ncplane = current->nc_plane;
-            target_state = &current->state;
-            break;
-        }
-        current = current->next;
-    }
-
-    if (target_state->scroll_offset > 0) {
-        if (current) {
-            for (size_t j = 0; j < pkt->data_len && current->pending_len < PENDING_BUF_SIZE; j++) {
-                current->pending_buf[current->pending_len++] = pkt->payload[j];
-            }
-        }
-    } else {
+    Pane *target = find_pane_global(ctx, pkt->pane_id);
+    if (!target) return;
         for (size_t j = 0; j < pkt->data_len; j++) {
-            parse_ansi_byte(target_state, pkt->payload[j], target_ncplane);
-        }
+        parse_ansi_byte(&target->state, pkt->payload[j], target->nc_plane);
     }
 
-
-    update_active_ui(ctx->nc, ctx->footer, ctx->active_pane, ctx->session_name, ctx->session_count);
-    notcurses_render(ctx->nc);
+    bool is_active_window = false;
+    Window *w = ctx->window_list_head;
+    while (w) {
+        Pane *p = w->pane_list_head;
+        while (p) { if (p == target) { is_active_window = (w == ctx->active_window); goto done; } p = p->next; }
+        w = w->next;
+    }
+    done:
+    if (is_active_window && !target->scroll_overlay) {
+        update_active_ui(ctx);
+        notcurses_render(ctx->nc);
+    }
 }
 
 
@@ -86,15 +107,15 @@ void horz_split(ClientContext *ctx, CronosPacket *pkt){
         
         struct ncplane *new_nc_plane = ncplane_create(ctx->std, &nopts);
         if (new_nc_plane == NULL) {
-            FILE *dbg = fopen("/tmp/cronos_debug.log", "a");
-            fprintf(dbg, "BUG: Failed to create HORZ plane. Rows: %d\n", lower_height);
-            fclose(dbg);
+        //     FILE *dbg = fopen("/tmp/cronos_debug.log", "a");
+        //     fprintf(dbg, "BUG: Failed to create HORZ plane. Rows: %d\n", lower_height);
+        //    fclose(dbg);
             return; 
         }
         ncplane_set_scrolling(new_nc_plane, true);
         ncplane_set_fg_rgb8(new_nc_plane, 220, 220, 220);
 
-        Pane *new_pane = malloc(sizeof(Pane));
+        Pane *new_pane = calloc(1, sizeof(Pane));
         new_pane->id = pkt->payload[1]; 
         new_pane->nc_plane = new_nc_plane;
         new_pane->border_plane = border_plane;
@@ -112,14 +133,14 @@ void horz_split(ClientContext *ctx, CronosPacket *pkt){
         send_resize_packet(ctx->client_sock, parent->id, parent->height, parent->width);
         send_resize_packet(ctx->client_sock, new_pane->id, new_pane->height, new_pane->width);
         
-        update_active_ui(ctx->nc, ctx->footer, ctx->active_pane, ctx->session_name, ctx->session_count);
+        update_active_ui(ctx);
         notcurses_render(ctx->nc);
     }
 }
 
     
 void vert_split(ClientContext *ctx, CronosPacket *pkt){
-    Pane *parent = ctx->active_pane; 
+    Pane *parent = ctx->pane_list_head; 
     while(parent){
         if(parent->id == pkt->pane_id) break; 
         parent = parent->next; 
@@ -171,7 +192,7 @@ void vert_split(ClientContext *ctx, CronosPacket *pkt){
         ncplane_set_scrolling(new_nc_plane, true);
         ncplane_set_fg_rgb8(new_nc_plane, 220, 220, 220);
 
-        Pane *new_pane = malloc(sizeof(Pane));
+        Pane *new_pane = calloc(1,sizeof(Pane));
         new_pane->id = pkt->payload[1]; 
         new_pane->nc_plane = new_nc_plane;
         new_pane->border_plane = border_plane;
@@ -189,7 +210,7 @@ void vert_split(ClientContext *ctx, CronosPacket *pkt){
         send_resize_packet(ctx->client_sock, parent->id, parent->height, parent->width);
         send_resize_packet(ctx->client_sock, new_pane->id, new_pane->height, new_pane->width);
         
-        update_active_ui(ctx->nc, ctx->footer, ctx->active_pane, ctx->session_name, ctx->session_count);
+        update_active_ui(ctx);
         notcurses_render(ctx->nc);
     }
 }
@@ -204,7 +225,7 @@ void res_pane_close(ClientContext *ctx, CronosPacket *pkt){
             Pane *neighbor = ctx->pane_list_head;
 
             while (neighbor) {
-                // Neighbor to the LEFT -- curr owns the shared border, dies with curr below
+                
                 if (neighbor != curr && neighbor->x + neighbor->width + 1 == curr->x && neighbor->y == curr->y) {
                     neighbor->width += curr->width + 1;
                     ncplane_resize(neighbor->nc_plane, 0, 0, neighbor->height, neighbor->width, 0, 0, neighbor->height, neighbor->width);
@@ -212,7 +233,7 @@ void res_pane_close(ClientContext *ctx, CronosPacket *pkt){
                     absorbed_by = neighbor;
                     break;
                 }
-                // Neighbor ABOVE -- curr owns the shared border, dies with curr below
+
                 if (neighbor != curr && neighbor->y + neighbor->height + 1 == curr->y && neighbor->x == curr->x) {
                     neighbor->height += curr->height + 1;
                     ncplane_resize(neighbor->nc_plane, 0, 0, neighbor->height, neighbor->width, 0, 0, neighbor->height, neighbor->width);
@@ -220,8 +241,7 @@ void res_pane_close(ClientContext *ctx, CronosPacket *pkt){
                     absorbed_by = neighbor;
                     break;
                 }
-                // Neighbor to the RIGHT -- neighbor owns the shared border; it must
-                // move left and inherit whatever border curr had on its far side
+                
                 if (neighbor != curr && neighbor->x == curr->x + curr->width + 1 && neighbor->y == curr->y) {
                     neighbor->x = curr->x;
                     neighbor->width += curr->width + 1;
@@ -235,7 +255,7 @@ void res_pane_close(ClientContext *ctx, CronosPacket *pkt){
                     absorbed_by = neighbor;
                     break;
                 }
-                // Neighbor BELOW -- same transfer logic, vertically
+                
                 if (neighbor != curr && neighbor->y == curr->y + curr->height + 1 && neighbor->x == curr->x) {
                     neighbor->y = curr->y;
                     neighbor->height += curr->height + 1;
@@ -268,7 +288,7 @@ void res_pane_close(ClientContext *ctx, CronosPacket *pkt){
         prev = curr;
         curr = curr->next;
     }
-    update_active_ui(ctx->nc, ctx->footer, ctx->active_pane, ctx->session_name, ctx->session_count);
+    update_active_ui(ctx);
     notcurses_render(ctx->nc);
 }
 
@@ -287,7 +307,7 @@ void handle_pane_focus(ClientContext *ctx, Action act) {
         }
         p = p->next;
     }
-    update_active_ui(ctx->nc, ctx->footer, ctx->active_pane, ctx->session_name, ctx->session_count);
+    update_active_ui(ctx);
     notcurses_render(ctx->nc);
 }
 
@@ -314,9 +334,78 @@ void handle_pane_resize(ClientContext *ctx, Action act) {
             }
             match = 1;
         }
+        if (act == ACTION_RESIZE_LEFT && neighbor->x + neighbor->width + 1 == ctx->active_pane->x && neighbor->y == ctx->active_pane->y) {
+            if (ctx->active_pane->width > 4) {
+                neighbor->width += 1;
+                ncplane_resize(neighbor->nc_plane, 0, 0, neighbor->height, neighbor->width, 0, 0, neighbor->height, neighbor->width);
+                send_resize_packet(ctx->client_sock, neighbor->id, neighbor->height, neighbor->width);
+
+                ctx->active_pane->x += 1;
+                ctx->active_pane->width -= 1;
+                ncplane_move_yx(ctx->active_pane->nc_plane, ctx->active_pane->y, ctx->active_pane->x);
+                ncplane_resize(ctx->active_pane->nc_plane, 0, 0, ctx->active_pane->height, ctx->active_pane->width, 0, 0, ctx->active_pane->height, ctx->active_pane->width);
+                send_resize_packet(ctx->client_sock, ctx->active_pane->id, ctx->active_pane->height, ctx->active_pane->width);
+
+                if (ctx->active_pane->border_plane) {
+                    ncplane_move_yx(ctx->active_pane->border_plane, ctx->active_pane->y, ctx->active_pane->x - 1);
+                }
+            }
+            match = 1;
+        }
+
+        if (act == ACTION_RESIZE_DOWN && neighbor->y == ctx->active_pane->y + ctx->active_pane->height + 1 && neighbor->x == ctx->active_pane->x) {
+            if (neighbor->height > 4) {
+                neighbor->y += 1;
+                neighbor->height -= 1;
+                ncplane_move_yx(neighbor->nc_plane, neighbor->y, neighbor->x);
+                ncplane_resize(neighbor->nc_plane, 0, 0, neighbor->height, neighbor->width, 0, 0, neighbor->height, neighbor->width);
+                send_resize_packet(ctx->client_sock, neighbor->id, neighbor->height, neighbor->width);
+
+                ctx->active_pane->height += 1;
+                ncplane_resize(ctx->active_pane->nc_plane, 0, 0, ctx->active_pane->height, ctx->active_pane->width, 0, 0, ctx->active_pane->height, ctx->active_pane->width);
+                send_resize_packet(ctx->client_sock, ctx->active_pane->id, ctx->active_pane->height, ctx->active_pane->width);
+
+                if (neighbor->border_plane) {
+                    ncplane_move_yx(neighbor->border_plane, ctx->active_pane->y + ctx->active_pane->height, ctx->active_pane->x);
+                }
+            }
+            match = 1;
+        }
+
+        if (act == ACTION_RESIZE_UP && neighbor->y + neighbor->height + 1 == ctx->active_pane->y && neighbor->x == ctx->active_pane->x) {
+            if (ctx->active_pane->height > 4) {
+                neighbor->height += 1;
+                ncplane_resize(neighbor->nc_plane, 0, 0, neighbor->height, neighbor->width, 0, 0, neighbor->height, neighbor->width);
+                send_resize_packet(ctx->client_sock, neighbor->id, neighbor->height, neighbor->width);
+
+                ctx->active_pane->y += 1;
+                ctx->active_pane->height -= 1;
+                ncplane_move_yx(ctx->active_pane->nc_plane, ctx->active_pane->y, ctx->active_pane->x);
+                ncplane_resize(ctx->active_pane->nc_plane, 0, 0, ctx->active_pane->height, ctx->active_pane->width, 0, 0, ctx->active_pane->height, ctx->active_pane->width);
+                send_resize_packet(ctx->client_sock, ctx->active_pane->id, ctx->active_pane->height, ctx->active_pane->width);
+
+                if (ctx->active_pane->border_plane) {
+                    ncplane_move_yx(ctx->active_pane->border_plane, ctx->active_pane->y - 1, ctx->active_pane->x);
+                }
+            }
+            match = 1;
+        }
 
         if (match) break;
         neighbor = neighbor->next;
     }
     notcurses_render(ctx->nc);
+}
+
+Pane *find_pane_global(ClientContext *ctx, int pane_id) {
+    Window *w = ctx->window_list_head;
+    while (w) {
+        Pane *p = w->pane_list_head;
+        while (p) {
+            if (p->id == pane_id) return p;
+            p = p->next;
+        }
+        w = w->next;
+    }
+    return NULL;
 }

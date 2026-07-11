@@ -17,11 +17,12 @@
 #include <errno.h> 
 #include <notcurses/notcurses.h>
 
-#include "guide.c"
+#include "guide.h"
 #include "pane.h"
 #include "keymap.h"
-#include "parser.c"
-
+#include "parser.h"
+#include "window.h"
+#include "session_ui.h"
 
 Pane *pane_list_head = NULL;
 Pane *pane_at_yx(int y, int x) {
@@ -34,7 +35,6 @@ Pane *pane_at_yx(int y, int x) {
 }
 
 ClientConfig g_client_config;
-
 
 
 
@@ -99,7 +99,7 @@ struct notcurses_options opts = {
 struct termios orig_t;
 int raw_mode_active = 0; 
 
-static struct notcurses *nc_global = NULL;
+struct notcurses *nc_global = NULL;
 
 int count_active_sessions(){
     DIR *dir = opendir("/tmp"); 
@@ -237,11 +237,18 @@ int run_session(const char *socket_path, const char *session_name){
 
     int session_count = count_active_sessions();
     ncplane_printf_yx(footer, 0, 1, " Cronos Multiplexer | Session: %s | Active Sessions: %d ", session_name, session_count);
-
     ncplane_resize(std, 0, 0, dimy - 1, dimx, 0, 0, dimy - 1, dimx);
-    ncplane_set_scrolling(std, true);
 
-    Pane *root_pane = malloc(sizeof(Pane));
+    struct ncplane_options root_opts = {
+    .y = 0, .x = 0,
+    .rows = dimy - 1, .cols = dimx,
+    };
+    struct ncplane *root_plane = ncplane_create(std, &root_opts);
+    ncplane_set_scrolling(root_plane, true);
+    ncplane_set_fg_rgb8(root_plane, 220, 220, 220);
+
+
+    Pane *root_pane = calloc(1,sizeof(Pane));
     root_pane->border_plane = NULL;
     root_pane->id = 0;
     root_pane->nc_plane = std;
@@ -252,15 +259,27 @@ int run_session(const char *socket_path, const char *session_name){
     root_pane->next = NULL;
     root_pane->state = pane_state;
 
+    Window *win0 = calloc(1, sizeof(Window));
+    win0->id = 0;
+    snprintf(win0->name, sizeof(win0->name), "win1");
+    win0->pane_list_head = root_pane;
+    win0->active_pane    = root_pane;
+
 
     ClientContext ctx; 
     memset(&ctx, 0, sizeof(ClientContext));
     ctx.std = std;
+    ctx.nc = nc;
     ctx.footer = footer;
     ctx.client_sock = client_sock;
     ctx.pane_list_head = root_pane;
     ctx.active_pane = root_pane;
     ctx.session_count = session_count;
+    ctx.window_list_head = win0;
+    ctx.active_window    = win0;
+    ctx.next_window_id   = 1;
+    ctx_sync_window(&ctx);
+
     strncpy(ctx.session_name, session_name, sizeof(ctx.session_name) - 1);
 
 
@@ -275,7 +294,6 @@ int run_session(const char *socket_path, const char *session_name){
         int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, -1); 
 
         for (int i = 0; i < num_events; i++) {
-            char buffer[BUFFER_SIZE]; 
             ncinput ni;
             uint32_t id;
 
@@ -285,8 +303,8 @@ int run_session(const char *socket_path, const char *session_name){
                     if(id == (uint32_t)-1) break; 
                     if (ni.evtype == NCTYPE_RELEASE) continue;
                     
-                    FILE *idbg = fopen("/tmp/cronos_input.log", "a");
-                    if (idbg) { fprintf(idbg, "id=0x%x alt=%d ctrl=%d shift=%d\n", id, ni.alt, ni.ctrl, ni.shift); fclose(idbg); }
+                    // FILE *idbg = fopen("/tmp/cronos_input.log", "a");
+                    // if (idbg) { fprintf(idbg, "id=0x%x alt=%d ctrl=%d shift=%d\n", id, ni.alt, ni.ctrl, ni.shift); fclose(idbg); }
 
                     if (!process_user_action(&ctx, id, &ni)) {
                         running = 0; 
@@ -298,8 +316,8 @@ int run_session(const char *socket_path, const char *session_name){
                 if(events[i].events & EPOLLIN){
                     CronosPacket pkt; 
                     ssize_t bytes = recv(client_sock, &pkt, sizeof(CronosPacket), MSG_WAITALL); 
-                    FILE *dbg = fopen("/tmp/cronos_client.log", "a");
-                    if (dbg) { fprintf(dbg, "RECV type=%d pane=%d len=%zu\n", pkt.type, pkt.pane_id, pkt.data_len); fclose(dbg); }
+                    // FILE *dbg = fopen("/tmp/cronos_client.log", "a");
+                    // if (dbg) { fprintf(dbg, "RECV type=%d pane=%d len=%zu\n", pkt.type, pkt.pane_id, pkt.data_len); fclose(dbg); }
 
 
                     if (bytes == sizeof(CronosPacket)) {
@@ -312,6 +330,9 @@ int run_session(const char *socket_path, const char *session_name){
                             }
                             else if (pkt.payload[0] == RES_SPLIT_VERT_SUCC) {     
                                 vert_split(&ctx,&pkt);                                  
+                            }
+                            else if (pkt.payload[0] == RES_NEW_WINDOW_SUCC) {
+                                window_finalize(&ctx, (int)(unsigned char)pkt.payload[1]);
                             }
                             else if (pkt.payload[0] == RES_PANE_CLOSED) {
                                 res_pane_close(&ctx,&pkt); 
