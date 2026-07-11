@@ -1,4 +1,4 @@
-# Cronos
+# Cronos Terminal Multiplexer
 
 A `tmux`-style terminal multiplexer written in C, built on a Unix-domain-socket
 client/server architecture with a `notcurses` terminal UI. Sessions run as detached
