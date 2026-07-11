@@ -14,12 +14,14 @@
 #define RES_SPLIT_HORZ_SUCC  4
 #define WINDOW_RESIZE        5
 #define RES_PANE_CLOSED 6
+#define REQ_CLOSE_PANE 7
+
 
 typedef struct {
     uint8_t type;      // 0 = Keystroke, 1 = PTY Output, 2 = Command (e.g., "Split")
-    int pane_id;       // Which pane is this for?
-    size_t data_len;   // How many bytes of payload?
-    char payload[BUFFER_SIZE]; // The actual text or ANSI codes
+    int pane_id;       
+    size_t data_len;   
+    char payload[BUFFER_SIZE]; 
 } CronosPacket;
 
 #endif

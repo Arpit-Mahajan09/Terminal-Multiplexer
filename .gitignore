@@ -1,0 +1,23 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.o
+*.os
+
+# Standard Executables
+*.out
+a.out
+
+# Cronos Specific Executables
+client
+test
+cronos
+cronos-server
+
+# Debugging and Logging
+*.log
+/tmp/cronos_*.log
+
+# Editor directories and files
+.vscode/

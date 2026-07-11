@@ -19,6 +19,49 @@
 #include <signal.h>
 
 #define MAX_PANES 10
+#define MAX_ENV_VARS 32
+
+typedef struct {
+    char shell_path[256];
+    char env_keys[MAX_ENV_VARS][64];
+    char env_vals[MAX_ENV_VARS][192];
+    int env_count;
+} ServerConfig;
+
+ServerConfig g_config;
+
+void load_server_config(void) {
+    strcpy(g_config.shell_path, "/bin/sh");
+    g_config.env_count = 0;
+
+    char path[512];
+    const char *home = getenv("HOME");
+    if (!home) return;
+    snprintf(path, sizeof(path), "%s/.config/cronos/cronos.conf", home);
+
+    FILE *f = fopen(path, "r");
+    if (!f) return; // defaults stand
+
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        // strip trailing newline
+        line[strcspn(line, "\r\n")] = 0;
+        if (line[0] == '#' || line[0] == '\0') continue;
+
+        char key[128], val[192];
+        if (strncmp(line, "shell", 5) == 0 && sscanf(line, "shell = %191[^\n]", val) == 1) {
+            strncpy(g_config.shell_path, val, sizeof(g_config.shell_path) - 1);
+        }
+        else if (strncmp(line, "env", 3) == 0 && sscanf(line, "env %127[^= ] = %191[^\n]", key, val) == 2) {
+            if (g_config.env_count < MAX_ENV_VARS) {
+                strncpy(g_config.env_keys[g_config.env_count], key, sizeof(g_config.env_keys[0]) - 1);
+                strncpy(g_config.env_vals[g_config.env_count], val, sizeof(g_config.env_vals[0]) - 1);
+                g_config.env_count++;
+            }
+        }
+    }
+    fclose(f);
+}
 
 typedef struct {
     int id;
@@ -65,20 +108,20 @@ int spawn_new_pty(int *pane_id){
     if (pid == 0) { 
         close(masterFd); 
         setsid();
-        if (ioctl(slaveFd, TIOCSCTTY, 0) == -1) {
-            FILE *cdbg = fopen("/tmp/cronos_spawn.log", "a");
-            if (cdbg) { fprintf(cdbg, "child: TIOCSCTTY failed errno=%d\n", errno); fclose(cdbg); }
-        }
+        ioctl(slaveFd, TIOCSCTTY, 0);
 
         dup2(slaveFd, STDIN_FILENO);
         dup2(slaveFd, STDOUT_FILENO);
         dup2(slaveFd, STDERR_FILENO);
         if(slaveFd > 2) close(slaveFd); 
-        setenv("TERM", "xterm-256color", 1);
+
+        setenv("TERM", "xterm-256color", 1); // fallback default, may be overridden below
+        for (int i = 0; i < g_config.env_count; i++) {
+            setenv(g_config.env_keys[i], g_config.env_vals[i], 1);
+        }
         
-        char *args[] = {"/bin/sh", "-i", NULL};
+        char *args[] = { g_config.shell_path, "-i", NULL };
         execvp(args[0], args);
-        // if we get here, exec failed -- this now goes to the pty (stderr), so it WILL be visible
         fprintf(stderr, "execvp failed: %s\n", strerror(errno));
         _exit(EXIT_FAILURE); 
     }
@@ -170,6 +213,7 @@ int main(int argc, char* argv[]) {
     }
 
     memset(panes, 0, sizeof(panes));
+    load_server_config();
     int primary_pane_id;
     int masterFd = spawn_new_pty(&primary_pane_id);
     if (masterFd == -1) return 1;
@@ -298,6 +342,12 @@ int main(int argc, char* argv[]) {
                                     write(client_sock, &res_pkt, sizeof(CronosPacket));
                                 }
                             }
+                            else if (pkt.payload[0] == REQ_CLOSE_PANE) {
+                                int target_id = pkt.pane_id;
+                                if (target_id > 0 && target_id < next_pane_id && panes[target_id].is_active) {
+                                    kill(-panes[target_id].shell_pid, SIGTERM);
+                                }
+                            }
                         }
                     } 
                     else if (bytes <= 0) { 
@@ -349,7 +399,17 @@ int main(int argc, char* argv[]) {
                             epoll_ctl(epoll_fd, EPOLL_CTL_DEL, active_fd, NULL);
                             close(active_fd);
 
-                            if (found_pane_id == 0) running = 0;
+                            if (found_pane_id == 0) {
+                                running = 0;
+                            } else if (client_sock != -1) {
+                                CronosPacket kill_pkt;
+                                memset(&kill_pkt, 0, sizeof(CronosPacket));
+                                kill_pkt.type = PKT_TYPE_COMMAND;
+                                kill_pkt.pane_id = found_pane_id;
+                                kill_pkt.data_len = 1;
+                                kill_pkt.payload[0] = RES_PANE_CLOSED;
+                                write(client_sock, &kill_pkt, sizeof(CronosPacket));
+                            }
                         }
                     }
                 }
