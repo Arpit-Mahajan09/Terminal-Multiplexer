@@ -7,6 +7,29 @@
 // This file acts as a state machine that would read the ANSI characters from server 
 // before sending them to the frontend
 
+static void ansi256_to_rgb(int idx, uint8_t *r, uint8_t *g, uint8_t *b) {
+    static const uint8_t basic[16][3] = {
+        {0,0,0}, {170,0,0}, {0,170,0}, {170,85,0},
+        {0,0,170}, {170,0,170}, {0,170,170}, {170,170,170},
+        {85,85,85}, {255,85,85}, {85,255,85}, {255,255,85},
+        {85,85,255}, {255,85,255}, {85,255,255}, {255,255,255}
+    };
+    if (idx < 16) {
+        *r = basic[idx][0]; *g = basic[idx][1]; *b = basic[idx][2];
+        return;
+    }
+    if (idx < 232) {
+        static const uint8_t levels[6] = {0, 95, 135, 175, 215, 255};
+        int i = idx - 16;
+        *r = levels[(i / 36) % 6];
+        *g = levels[(i / 6) % 6];
+        *b = levels[i % 6];
+        return;
+    }
+    uint8_t gray = (uint8_t)(8 + (idx - 232) * 10);
+    *r = *g = *b = gray;
+}
+
 void init_terminal_state(TerminalState *state) {
     state->current_state = STATE_GROUND;
     state->param_count = 0;
@@ -14,6 +37,8 @@ void init_terminal_state(TerminalState *state) {
     for (int i = 0; i<MAX_ANSI_PARAMS; i++) {
         state->params[i] = 0;
     }
+    state->saved_cursor_y = 0;   
+    state->saved_cursor_x = 0;   
 
     state->scrollback_head = 0;
     state->scrollback_count = 0;
@@ -30,6 +55,24 @@ void execute_csi_sequence(TerminalState *state, char final_byte, struct ncplane 
         }
 
         for (int i = 0; i < state->param_count; i++) {
+
+            if (state->params[i]== 38 || state->params[i]== 48) {                       // NEW: extended color
+                int is_fg = (state->params[i]== 38);
+                if (i + 1 < state->param_count && state->params[i+1] == 5 && i + 2 < state->param_count) {
+                    uint8_t r, g, b;
+                    ansi256_to_rgb(state->params[i+2], &r, &g, &b);
+                    if (is_fg) ncplane_set_fg_rgb8(pane, r, g, b);
+                    else       ncplane_set_bg_rgb8(pane, r, g, b);
+                    i += 2;
+                } else if (i + 1 < state->param_count && state->params[i+1] == 2 && i + 4 < state->param_count) {
+                    int r = state->params[i+2], g = state->params[i+3], b = state->params[i+4];
+                    if (is_fg) ncplane_set_fg_rgb8(pane, r, g, b);
+                    else       ncplane_set_bg_rgb8(pane, r, g, b);
+                    i += 4;
+                }
+                continue;
+            }
+
             switch (state->params[i]) {
                 case 0:  // Reset all formatting
                     ncplane_set_fg_rgb8(pane, 220, 220, 220);
@@ -79,8 +122,17 @@ void execute_csi_sequence(TerminalState *state, char final_byte, struct ncplane 
                 case 49: ncplane_set_bg_default(pane); break;             // Default Background
             }
         }
-    } else if (final_byte == 'H') {
-        // CUP (Cursor Position)
+    } else if (final_byte == 's') {   // Save cursor (CSI form)
+        unsigned int y, x;
+        ncplane_cursor_yx(pane, &y, &x);
+        state->saved_cursor_y = (int)y;
+        state->saved_cursor_x = (int)x;
+    }
+    else if (final_byte == 'u') {   // Restore cursor (CSI form)
+        ncplane_cursor_move_yx(pane, state->saved_cursor_y, state->saved_cursor_x);
+    }
+    else if (final_byte == 'H') {
+    // CUP (Cursor Position)
         int row = (state->param_count>0 && state->params[0]>0)? state->params[0]:1;
         int col = (state->param_count>1 && state->params[1]>0)? state->params[1]:1;
         ncplane_cursor_move_yx(pane, row - 1, col - 1);
@@ -110,7 +162,7 @@ void execute_csi_sequence(TerminalState *state, char final_byte, struct ncplane 
         ncplane_dim_yx(pane, &dimY, &dimX); 
 
         if(param==0){
-            for(unsigned int i=curX; i<dimX; i++){
+            for(unsigned int i=curX; i<=curX && i<dimX; i++){
                 ncplane_putchar_yx(pane, curY, i, ' '); 
             }
         }
@@ -225,8 +277,16 @@ void parse_ansi_byte(TerminalState *state, char ch, struct ncplane *pane) {
                 for (int i = 0; i < MAX_ANSI_PARAMS; i++) state->params[i] = 0;
             } else if(ch == ']'){
                 state->current_state = STATE_OSC; 
-            }
-            else{
+            } else if (ch == '7') {                         
+                    unsigned int y, x;
+                    ncplane_cursor_yx(pane, &y, &x);
+                    state->saved_cursor_y = (int)y;
+                    state->saved_cursor_x = (int)x;
+                    state->current_state = STATE_GROUND;
+            } else if (ch == '8') {                         
+                    ncplane_cursor_move_yx(pane, state->saved_cursor_y, state->saved_cursor_x);
+                    state->current_state = STATE_GROUND;
+            } else{
                 // CSI sequence (could be OSC, DCS, etc. which are more complex)
                 // For a basic multiplexer, drop it and return to ground
                 state->current_state = STATE_GROUND;
@@ -278,6 +338,7 @@ void parse_ansi_byte(TerminalState *state, char ch, struct ncplane *pane) {
         case STATE_OSC_ESCAPE:
             state->current_state = (ch == '\\') ? STATE_GROUND : STATE_OSC;
             break;
+        
 
     }
 }

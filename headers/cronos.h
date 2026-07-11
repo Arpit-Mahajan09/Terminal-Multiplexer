@@ -79,11 +79,15 @@ typedef struct {
 } CronosPacket;
 
 
+
 typedef struct {
     AnsiState current_state;
     int params[MAX_ANSI_PARAMS]; 
     int param_count;
     int current_param_value;     
+
+    int saved_cursor_y;      
+    int saved_cursor_x;
 
     char scrollback[SCROLLBACK_MAX_LINES][SCROLLBACK_LINE_WIDTH];
     int scrollback_head;    

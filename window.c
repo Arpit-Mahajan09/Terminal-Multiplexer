@@ -9,6 +9,7 @@
 
 // helpers______________________________
 
+
 void ctx_sync_window(ClientContext *ctx) {
     if (!ctx->active_window) return;
     ctx->pane_list_head = ctx->active_window->pane_list_head;
@@ -43,6 +44,38 @@ static void show_window(Window *w) {
 
 // __ Main _____________________________________________
 
+void window_prompt_rename(ClientContext *ctx) {
+    if (!ctx->footer || !ctx->active_window) return;
+
+    char buf[32] = {0};
+    size_t pos = 0;
+    ncinput ni;
+    uint32_t id;
+
+    ncplane_erase(ctx->footer);
+    ncplane_printf_yx(ctx->footer, 0, 1, "Rename window to: ");
+    notcurses_render(ctx->nc);
+
+    while ((id = notcurses_get_blocking(ctx->nc, &ni)) != (uint32_t)-1) {
+        if (id == '\r' || id == NCKEY_ENTER) break;
+        if (id == NCKEY_ESC) { pos = 0; break; }              // cancel
+        if ((id == NCKEY_BACKSPACE || id == 0x7F) && pos > 0) {
+            buf[--pos] = '\0';
+        } else if (id < 0x80 && id >= 0x20 && pos + 1 < sizeof(buf)) {
+            buf[pos++] = (char)id;
+        }
+        ncplane_erase(ctx->footer);
+        ncplane_printf_yx(ctx->footer, 0, 1, "Rename window to: %s", buf);
+        notcurses_render(ctx->nc);
+    }
+
+    if (pos > 0) {
+        window_rename(ctx, buf);       // redraws the bar itself
+    } else {
+        window_render_bar(ctx);        // restore normal footer on cancel/empty
+        notcurses_render(ctx->nc);
+    }
+}
 
 Window *window_create(ClientContext *ctx) {
     CronosPacket pkt;

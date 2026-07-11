@@ -15,6 +15,13 @@ int keymap_count = 0;
 
 
 void bind_key(uint32_t key, int ctrl, int alt, Action action) {
+    for (int i = 0; i < keymap_count; i++) {                
+        if (keymap[i].key == key && keymap[i].needs_ctrl == ctrl && keymap[i].needs_alt == alt) {
+            keymap[i].action = action;                        
+            return;
+        }
+    }
+
     if (keymap_count >= MAX_KEYBINDINGS) return;
     keymap[keymap_count].key = key;
     keymap[keymap_count].needs_ctrl = ctrl;
@@ -52,7 +59,13 @@ int parse_key_name(const char *name, uint32_t *key_out) {
     if (strcmp(name, "right") == 0) { *key_out = NCKEY_RIGHT; return 1; }
     if (strcmp(name, "up") == 0)    { *key_out = NCKEY_UP;    return 1; }
     if (strcmp(name, "down") == 0)  { *key_out = NCKEY_DOWN;  return 1; }
+
+    if (strcmp(name, "pgup") == 0)      { *key_out = NCKEY_PGUP;      return 1; }  // NEW
+    if (strcmp(name, "pgdown") == 0)    { *key_out = NCKEY_PGDOWN;    return 1; }  // NEW
+    if (strcmp(name, "enter") == 0)     { *key_out = NCKEY_ENTER;     return 1; }  // NEW
+    if (strcmp(name, "backspace") == 0) { *key_out = NCKEY_BACKSPACE; return 1; }  // NEW
     if (strlen(name) == 1) { *key_out = (uint32_t)name[0]; return 1; }
+
     return 0;
 }
 
@@ -124,6 +137,14 @@ Action parse_action_name(const char *name) {
     if (strcmp(name, "resize_right") == 0) return ACTION_RESIZE_RIGHT;
     if (strcmp(name, "resize_up") == 0)    return ACTION_RESIZE_UP;
     if (strcmp(name, "resize_down") == 0)  return ACTION_RESIZE_DOWN;
+
+    if (strcmp(name, "scroll_up") == 0)     return ACTION_SCROLL_UP;      
+    if (strcmp(name, "scroll_down") == 0)   return ACTION_SCROLL_DOWN;    
+    if (strcmp(name, "new_window") == 0)    return ACTION_NEW_WINDOW;     
+    if (strcmp(name, "next_window") == 0)   return ACTION_NEXT_WINDOW;    
+    if (strcmp(name, "prev_window") == 0)   return ACTION_PREV_WINDOW;    
+    if (strcmp(name, "rename_window") == 0) return ACTION_RENAME_WINDOW;  
+    if (strcmp(name, "session_menu") == 0)  return ACTION_SESSION_MENU;   
     
     return ACTION_NONE;
 }
@@ -196,7 +217,7 @@ int process_user_action(ClientContext *ctx, uint32_t id, ncinput *ni) {
                 break;
 
             case ACTION_RENAME_WINDOW: {
-                window_rename(ctx, "renamed");  
+                window_prompt_rename(ctx);
                 break;
             }
 
