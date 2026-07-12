@@ -12,6 +12,7 @@ void    window_prev(ClientContext *ctx);
 void    window_rename(ClientContext *ctx, const char *name);
 void    window_render_bar(ClientContext *ctx);
 void window_prompt_rename(ClientContext *ctx);
+void    window_close(ClientContext *ctx);
 
 
 void    window_finalize(ClientContext *ctx, int server_pane_id);

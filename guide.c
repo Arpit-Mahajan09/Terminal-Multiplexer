@@ -26,20 +26,26 @@ void print_short(char *prog){
 
     printf("Cronos Terminal Multiplexer CLI\n\n");
     printf("Shortcut Keys: \n");
-    
+ 
     printf("  Split Vertically       :  Ctrl + v\n");
     printf("  Split Horizontally     :  Ctrl + b\n");
     printf("  Move Focus Left        :  Ctrl + h\n");
-    printf("  Move Focus Above       :  Ctrl + j\n"); 
-    printf("  Move Focus Below       :  Ctrl + k\n\n");
-    printf("  Move Focus Rihgt       :  Ctrl + l\n\n");
-
+    printf("  Move Focus Right       :  Ctrl + l\n");
+    printf("  Move Focus Up          :  Ctrl + k\n");
+    printf("  Move Focus Down        :  Ctrl + j\n\n");
+ 
     printf("  Resize Pane            :  Alt + Arrow Keys\n");
     printf("  Scroll Pane History    :  Page Up / Page Down\n");
+    printf("  Close Active Pane      :  Ctrl + w\n\n");
+ 
+    printf("  New Window (Tab)       :  Ctrl + n\n");
+    printf("  Rename Window          :  Ctrl + r\n");
+    printf("  Close Window           :  Ctrl + x\n");
+    printf("  Next / Prev Window     :  Ctrl + ] / Ctrl + [\n\n");
+ 
+    printf("  Session Manager        :  Ctrl + a\n");
     printf("  Detach Session         :  Ctrl + q\n\n");
-
-    printf("  Close Single Pnae      :  Ctrl + w\n");
-    printf("  Close Terminal       :  Ctrl + q\n\n");
+    
 }
 
 

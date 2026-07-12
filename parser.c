@@ -162,7 +162,7 @@ void execute_csi_sequence(TerminalState *state, char final_byte, struct ncplane 
         ncplane_dim_yx(pane, &dimY, &dimX); 
 
         if(param==0){
-            for(unsigned int i=curX; i<=curX && i<dimX; i++){
+            for(unsigned int i=curX; i<dimX; i++){
                 ncplane_putchar_yx(pane, curY, i, ' '); 
             }
         }

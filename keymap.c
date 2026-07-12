@@ -48,6 +48,7 @@ void load_default_keymap(void) {
 
     bind_key('n', 1, 0, ACTION_NEW_WINDOW);   bind_key('N', 1, 0, ACTION_NEW_WINDOW);
     bind_key('r', 1, 0, ACTION_RENAME_WINDOW); bind_key('R', 1, 0, ACTION_RENAME_WINDOW);
+    bind_key('x', 1, 0, ACTION_CLOSE_WINDOW);  bind_key('X', 1, 0, ACTION_CLOSE_WINDOW);
     bind_key('a', 1, 0, ACTION_SESSION_MENU); bind_key('A', 1, 0, ACTION_SESSION_MENU);
     bind_key(']', 1, 0, ACTION_NEXT_WINDOW);
     bind_key('[', 1, 0, ACTION_PREV_WINDOW);
@@ -144,6 +145,7 @@ Action parse_action_name(const char *name) {
     if (strcmp(name, "next_window") == 0)   return ACTION_NEXT_WINDOW;    
     if (strcmp(name, "prev_window") == 0)   return ACTION_PREV_WINDOW;    
     if (strcmp(name, "rename_window") == 0) return ACTION_RENAME_WINDOW;  
+    if (strcmp(name, "close_window") == 0)  return ACTION_CLOSE_WINDOW;
     if (strcmp(name, "session_menu") == 0)  return ACTION_SESSION_MENU;   
     
     return ACTION_NONE;
@@ -220,6 +222,10 @@ int process_user_action(ClientContext *ctx, uint32_t id, ncinput *ni) {
                 window_prompt_rename(ctx);
                 break;
             }
+
+            case ACTION_CLOSE_WINDOW:
+                window_close(ctx);
+                break;
 
             case ACTION_SESSION_MENU:
                 show_session_ui(ctx);

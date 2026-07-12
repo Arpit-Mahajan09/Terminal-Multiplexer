@@ -13,10 +13,10 @@ CLIENT_SRCS   = client.c pane.c keymap.c guide.c parser.c window.c session_ui.c
 
 all: $(CLIENT_TARGET) $(SERVER_TARGET)
 
-$(CLIENT_TARGET): $(CLIENT_SRCS) cronos.h
+$(CLIENT_TARGET): $(CLIENT_SRCS) headers/cronos.h
 	$(CC) $(CFLAGS) $(CLIENT_SRCS) -o $(CLIENT_TARGET) $(LIBS)
 
-$(SERVER_TARGET): server.c cronos.h
+$(SERVER_TARGET): server.c headers/cronos.h
 	$(CC) $(CFLAGS) server.c -o $(SERVER_TARGET) $(LIBS)
 
 clean:

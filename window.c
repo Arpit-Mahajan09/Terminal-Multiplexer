@@ -172,6 +172,81 @@ void window_rename(ClientContext *ctx, const char *name) {
     notcurses_render(ctx->nc);
 }
 
+// Closes the currently active window: asks the server to tear down every
+// pane it owns, then frees the client-side Window/Pane structures and
+// falls back to a neighboring window. The server has no concept of
+// "windows" (it only tracks a flat array of panes by id), so a window
+// close is just "close each of my panes, then forget I exist" from the
+// client's point of view.
+void window_close(ClientContext *ctx) {
+    if (!ctx->active_window) return;
+
+    Window *target = ctx->active_window;
+
+    // Refuse to close the last remaining window - a session always needs
+    // at least one window alive. Detach or `cronos kill` to end the
+    // session instead.
+    if (target->next == NULL && ctx->window_list_head == target) {
+        return;
+    }
+
+    // Refuse to close a window that owns pane id 0. The server treats
+    // pane 0 as the session's root pane and will not honor
+    // REQ_CLOSE_PANE for it - closing it is equivalent to ending the
+    // whole session, which happens naturally when its shell exits.
+    for (Pane *p = target->pane_list_head; p; p = p->next) {
+        if (p->id == 0) return;
+    }
+
+    // Ask the server to SIGTERM every pane's process group in this
+    // window. RES_PANE_CLOSED replies for these ids will arrive later;
+    // res_pane_close() already looks panes up via find_pane_global() and
+    // no-ops safely if a pane is no longer present client-side, so we
+    // don't need to wait for those replies before freeing our own state.
+    for (Pane *p = target->pane_list_head; p; p = p->next) {
+        CronosPacket pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.type       = PKT_TYPE_COMMAND;
+        pkt.pane_id    = p->id;
+        pkt.data_len   = 1;
+        pkt.payload[0] = REQ_CLOSE_PANE;
+        write(ctx->client_sock, &pkt, sizeof(pkt));
+    }
+
+    // Switch off this window *before* freeing it, so ctx->active_window
+    // and ctx->active_pane never dangle. Prefer the next window, wrap to
+    // the head of the list otherwise.
+    Window *fallback = target->next ? target->next : ctx->window_list_head;
+    if (fallback != target) {
+        window_switch(ctx, fallback);
+    }
+
+    // Unlink target from the window list.
+    if (ctx->window_list_head == target) {
+        ctx->window_list_head = target->next;
+    } else {
+        Window *w = ctx->window_list_head;
+        while (w && w->next != target) w = w->next;
+        if (w) w->next = target->next;
+    }
+
+    // Free every pane's notcurses planes and the Pane structs themselves.
+    Pane *p = target->pane_list_head;
+    while (p) {
+        Pane *next = p->next;
+        if (p->scroll_overlay) ncplane_destroy(p->scroll_overlay);
+        if (p->border_plane)   ncplane_destroy(p->border_plane);
+        if (p->nc_plane)       ncplane_destroy(p->nc_plane);
+        free(p);
+        p = next;
+    }
+
+    free(target);
+
+    window_render_bar(ctx);
+    notcurses_render(ctx->nc);
+}
+
 // Renders footer showing window tabs + session info
 void window_render_bar(ClientContext *ctx) {
     if (!ctx->footer) return;

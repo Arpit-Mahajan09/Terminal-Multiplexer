@@ -81,26 +81,32 @@ size_t hist_size = 0;
 int spawn_new_pty(int *pane_id){
     if(next_pane_id>= MAX_PANES) return -1;
 
-    FILE *dbg = fopen("/tmp/cronos_spawn.log", "a");
+    //FILE *dbg = fopen("/tmp/cronos_spawn.log", "a");
 
     int masterFd = posix_openpt(O_RDWR | O_NOCTTY);
-    if (masterFd == -1) { if(dbg) fprintf(dbg, "posix_openpt failed: %d\n", errno); if(dbg) fclose(dbg); return -1; }
-    if (grantpt(masterFd) == -1) { if(dbg) fprintf(dbg, "grantpt failed: %d\n", errno); if(dbg) fclose(dbg); return -1; }
-    if (unlockpt(masterFd) == -1) { if(dbg) fprintf(dbg, "unlockpt failed: %d\n", errno); if(dbg) fclose(dbg); return -1; }
+    if (grantpt(masterFd) == -1) { 
+       // if(dbg) fprintf(dbg, "grantpt failed: %d\n", errno); if(dbg) fclose(dbg); 
+        return -1; }
+    if (masterFd == -1) {
+        // if(dbg) fprintf(dbg, "posix_openpt failed: %d\n", errno); if(dbg) fclose(dbg); 
+         return -1; }
+    if (unlockpt(masterFd) == -1) { 
+//        if(dbg) fprintf(dbg, "unlockpt failed: %d\n", errno); if(dbg) fclose(dbg); 
+        return -1; }
 
     struct winsize ws = { .ws_row = 24, .ws_col = 80 };
     ioctl(masterFd, TIOCSWINSZ, &ws);
     
     char* slave_name = ptsname(masterFd);
-    if (dbg) fprintf(dbg, "slave_name = %s\n", slave_name ? slave_name : "NULL");
+    // if (dbg) fprintf(dbg, "slave_name = %s\n", slave_name ? slave_name : "NULL");
 
     int slaveFd = open(slave_name, O_RDWR|O_NOCTTY);
     if (slaveFd == -1) {
-        if (dbg) { fprintf(dbg, "open(slave) FAILED: errno=%d (%s)\n", errno, strerror(errno)); fclose(dbg); }
+        // if (dbg) { fprintf(dbg, "open(slave) FAILED: errno=%d (%s)\n", errno, strerror(errno)); fclose(dbg); }
         close(masterFd);
         return -1;
     }
-    if (dbg) fprintf(dbg, "slaveFd opened OK: %d\n", slaveFd);
+    // if (dbg) fprintf(dbg, "slaveFd opened OK: %d\n", slaveFd);
     
     pid_t pid = fork(); 
 
@@ -126,7 +132,7 @@ int spawn_new_pty(int *pane_id){
     }
     else if (pid > 0) {
         close(slaveFd);
-        if (dbg) { fprintf(dbg, "forked child pid=%d for pane %d\n", pid, next_pane_id); fclose(dbg); }
+        // if (dbg) { fprintf(dbg, "forked child pid=%d for pane %d\n", pid, next_pane_id); fclose(dbg); }
         
         *pane_id = next_pane_id;
         panes[*pane_id].id = *pane_id;
@@ -138,7 +144,7 @@ int spawn_new_pty(int *pane_id){
         return masterFd;
     }
 
-    if (dbg) { fprintf(dbg, "fork() FAILED: errno=%d\n", errno); fclose(dbg); }
+    // if (dbg) { fprintf(dbg, "fork() FAILED: errno=%d\n", errno); fclose(dbg); }
     close(slaveFd);
     close(masterFd);
     return -1; 
@@ -412,12 +418,12 @@ int main(int argc, char* argv[]) {
                         memset(&pkt, 0, sizeof(CronosPacket));
 
                         ssize_t bytes = read(active_fd, pkt.payload, sizeof(pkt.payload));
-                        FILE *dbg = fopen("/tmp/cronos_server.log", "a");
-                        if (dbg) {
-                            fprintf(dbg, "read(fd=%d, pane=%d) -> %zd  errno=%d (%s)\n",
-                                active_fd, found_pane_id, bytes, errno, strerror(errno));
-                            fclose(dbg);
-                        }
+                        // FILE *dbg = fopen("/tmp/cronos_server.log", "a");
+                        // if (dbg) {
+                            // fprintf(dbg, "read(fd=%d, pane=%d) -> %zd  errno=%d (%s)\n",
+                                // active_fd, found_pane_id, bytes, errno, strerror(errno));
+                            // fclose(dbg);
+                        // }
 
                         if (bytes > 0) {
                             if (found_pane_id == 0) add_to_history((char*)pkt.payload, bytes);
